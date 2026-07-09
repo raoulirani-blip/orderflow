@@ -2092,13 +2092,12 @@ class Cockpit(QtWidgets.QMainWindow):
         self._alerts_save_cfg()
 
     def _start_telegram_bot(self):
-        """(Re)démarre le bot Telegram selon la config."""
-        try:
-            if getattr(self, "_tg_bot", None):
-                self._tg_bot.stop()
-        except Exception:
-            pass
+        """DÉSACTIVÉ sur le PC : le bot Telegram tourne EXCLUSIVEMENT sur le serveur
+        cloud (server.py). On ne le lance jamais ici, pour qu'il soit impossible d'avoir
+        deux bots en conflit. Filet de sécurité même si un vieux code l'appelle."""
         self._tg_bot = None
+        return
+        # (ancien code neutralisé — conservé pour référence)
         cfg = self._alert_cfg
         if cfg.get("tg_bot_on") and cfg.get("tg_token"):
             from telegram_bot import TelegramCopilotBot
