@@ -1,0 +1,17 @@
+[Unit]
+Description=Order Flow Cockpit - serveur 24/7 (alertes ntfy + bot Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/orderflow
+ExecStart=/usr/bin/python3 -u /home/ubuntu/orderflow/server.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/orderflow/server.log
+StandardError=append:/home/ubuntu/orderflow/server.log
+
+[Install]
+WantedBy=multi-user.target
