@@ -42,7 +42,7 @@ def _default_cfg():
             "ntfy_topic": "", "tg_token": "", "tg_chat": "", "tg_bot_on": True,
             "model": "sonnet",
             "start_h": 0, "end_h": 24, "levels": [],
-            "approach": 75.0, "live_interval": 45,
+            "approach": 100.0, "live_interval": 45,
             "approach_on": True, "wall_on": True, "wall_min": 100.0,
             "accel_on": True, "accel_factor": 2.0}
 
@@ -123,6 +123,8 @@ class AlertServer:
             return self._cmd_live()
         if low.startswith("/model"):
             return self._cmd_modele(q)
+        if low.startswith("/proxi") or low.startswith("/distance"):
+            return self._cmd_proximite(q)
         if low in ("/update", "/maj"):
             return self._cmd_update()
         if low in ("/aide", "/help", "/start", "aide"):
@@ -130,6 +132,7 @@ class AlertServer:
                     "/live — TOUTES les données en direct (prix, CVD, murs, VWAP, POC…)\n"
                     "/status — état du serveur + tes niveaux\n"
                     "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
+                    "/proximite 100 — distance d'alerte (à combien de $ ça te prévient)\n"
                     "/modele sonnet — choisir le modèle IA (sonnet / opus / haiku)\n"
                     "/update — récupérer la dernière version du code\n"
                     "\n…ou pose une question libre (« je short ici ? ») → le copilote analyse.")
@@ -220,6 +223,16 @@ class AlertServer:
                 car = "accumulé" if b >= sv else "distribué"
                 L.append(f"{p:,.0f} (à {abs(p-mid):.0f}$) : {car} — achat {b:.0f} / vente {sv:.0f}")
         return "\n".join(L)
+
+    def _cmd_proximite(self, q):
+        import re
+        m = re.findall(r"\d+(?:\.\d+)?", q)
+        if not m:
+            return (f"Distance d'alerte actuelle : {self.cfg.get('approach', 100):.0f}$\n"
+                    "Pour changer : /proximite 100  (= alerte quand le prix est à 100$ d'un niveau)")
+        self.cfg["approach"] = float(m[0])
+        self._save_cfg()
+        return f"✅ Alerte quand le prix arrive à {self.cfg['approach']:.0f}$ (ou moins) d'un de tes niveaux."
 
     def _cmd_modele(self, q):
         low = q.lower()
