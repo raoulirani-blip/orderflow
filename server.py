@@ -102,8 +102,68 @@ class AlertServer:
         print(f"[Telegram] chat_id appris : {chat_id}")
 
     def _telegram_question(self, question):
-        ok, text = self.copilot.chat_sync(question, self._snapshot_text())
+        q = question.strip()
+        low = q.lower()
+        # --- commandes de pilotage ---
+        if low in ("/status", "/statut", "status"):
+            return self._cmd_status()
+        if low.startswith("/niveau"):
+            return self._cmd_niveaux(q)
+        if low in ("/update", "/maj"):
+            return self._cmd_update()
+        if low in ("/aide", "/help", "/start", "aide"):
+            return ("🤖 Copilote Order Flow — commandes :\n"
+                    "/status — état du serveur + prix + tes niveaux\n"
+                    "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
+                    "/update — récupérer la dernière version du code\n"
+                    "\n…ou pose simplement une question libre (« il se passe quoi à 63k ? »).")
+        # --- sinon : question libre au copilote ---
+        ok, text = self.copilot.chat_sync(q, self._snapshot_text())
         return text if ok else f"⚠ {text}"
+
+    def _cmd_status(self):
+        s = self.state or {}
+        mid = s.get("mid")
+        oks = sum(1 for v in self.engine.agg.status.values() if v == "ok")
+        lv = ", ".join(f"{x:.0f}" for x in self.cfg.get("levels", [])) or "(aucun)"
+        prix = f"{mid:,.0f}$" if mid else "en synchro…"
+        return (f"🟢 Serveur actif\n"
+                f"Prix : {prix}\n"
+                f"Venues : {oks}/4 OK\n"
+                f"Niveaux surveillés : {lv}\n"
+                f"Fenêtre : {self.cfg.get('start_h')}h–{self.cfg.get('end_h')}h\n"
+                f"Alertes : {'ON' if self.cfg.get('enabled') else 'OFF'}")
+
+    def _cmd_niveaux(self, q):
+        import re
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", q) if float(x) > 100]
+        if not nums:
+            cur = ", ".join(f"{x:.0f}" for x in self.cfg.get("levels", [])) or "(aucun)"
+            return (f"Tes niveaux actuels : {cur}\n"
+                    "Pour les changer : /niveaux 61000, 62000, 63500")
+        self.cfg["levels"] = sorted(set(nums))
+        self._save_cfg()
+        # réinitialise l'état des zones d'approche pour les nouveaux niveaux
+        self._alert_state = {k: v for k, v in self._alert_state.items()
+                             if not k.startswith("lvl_")}
+        return "✅ Niveaux mis à jour : " + ", ".join(f"{x:.0f}" for x in self.cfg["levels"])
+
+    def _cmd_update(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "fetch", "origin", "--quiet"], cwd=HERE, timeout=30)
+            before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE,
+                                    capture_output=True, text=True).stdout.strip()
+            after = subprocess.run(["git", "rev-parse", "origin/main"], cwd=HERE,
+                                   capture_output=True, text=True).stdout.strip()
+            if before == after:
+                return "ℹ️ Déjà à jour (aucune nouvelle version)."
+            subprocess.run(["git", "reset", "--hard", "origin/main", "--quiet"],
+                           cwd=HERE, timeout=30)
+            subprocess.Popen("sleep 3 && sudo systemctl restart orderflow", shell=True)
+            return "✅ Nouvelle version récupérée. Redémarrage dans 3 s…"
+        except Exception as e:
+            return f"⚠ Échec de la mise à jour : {e}"
 
     # ---------- helpers marché ----------
     def _nearest_wall(self, price):
