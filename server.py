@@ -71,10 +71,12 @@ class AlertServer:
         self._last_hist = 0.0
         self.tg = None
         self._start_telegram()
-        self._ensure_autoupdate()           # script de MAJ auto (auto-réparé)
         # synchro des niveaux depuis l'appli PC (via GitHub) en tâche de fond
         self._last_niveaux_raw = None
         threading.Thread(target=self._poll_levels_loop, daemon=True).start()
+        # AUTO-MISE À JOUR fiable : le serveur se surveille lui-même et se relance
+        # tout seul quand du nouveau code arrive (pas de sudo/cron -> ne peut pas rater)
+        threading.Thread(target=self._self_update_loop, daemon=True).start()
 
     # ---------- config ----------
     def _load_cfg(self):
@@ -117,6 +119,34 @@ class AlertServer:
                     self._alert_state = {k: v for k, v in self._alert_state.items()
                                          if not k.startswith("lvl_")}
                     print(f"[NIVEAUX] synchro depuis l'appli PC : {lv}")
+            except Exception:
+                pass
+
+    def _self_update_loop(self):
+        """Vérifie GitHub toutes les 2 min. Si du CODE a changé, se met à jour et se
+        relance tout seul (os._exit -> systemd Restart=always redémarre avec le neuf).
+        Un simple changement de niveaux.json ne relance PAS (lu en direct ailleurs)."""
+        import subprocess
+        while True:
+            time.sleep(120)
+            try:
+                subprocess.run(["git", "fetch", "origin", "--quiet"], cwd=HERE,
+                               timeout=30, capture_output=True)
+                before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE,
+                                        capture_output=True, text=True).stdout.strip()
+                after = subprocess.run(["git", "rev-parse", "origin/main"], cwd=HERE,
+                                       capture_output=True, text=True).stdout.strip()
+                if not before or before == after:
+                    continue
+                changed = subprocess.run(["git", "diff", "--name-only", before, after],
+                                         cwd=HERE, capture_output=True, text=True).stdout
+                subprocess.run(["git", "reset", "--hard", "origin/main", "--quiet"],
+                               cwd=HERE, timeout=30, capture_output=True)
+                code_changed = any(l.strip() and l.strip() != "niveaux.json"
+                                   for l in changed.splitlines())
+                if code_changed:
+                    print("[AUTO-UPDATE] nouveau code récupéré — redémarrage automatique")
+                    os._exit(0)     # systemd relance immédiatement avec le nouveau code
             except Exception:
                 pass
 
