@@ -103,7 +103,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self._tape_ema = None
         self._tg_bot = None
         self._build_ui()
-        self._start_telegram_bot()
+        # (le bot Telegram tourne sur le serveur, pas ici — voir server.py)
         self.engine.start()
         # Periodic bilans: each window refreshes at its own rhythm.
         self.WINDOWS = [5, 15, 30, 60]   # minutes
@@ -158,10 +158,10 @@ class Cockpit(QtWidgets.QMainWindow):
         self._sound_seen = set()
         self._sound_init = False
 
-        # --- ALERTES WhatsApp : le timer d'évaluation (notifier déjà créé avant l'UI) ---
-        self._alerts_timer = QtCore.QTimer(self)
-        self._alerts_timer.timeout.connect(self._alerts_tick)
-        self._alerts_timer.start(2000)     # évalue les conditions toutes les 2 s
+        # ALERTES & BOT TELEGRAM : DÉSACTIVÉS côté PC — c'est le serveur cloud 24/7
+        # qui s'en occupe (server.py). On ne lance NI le moteur d'alertes NI le bot
+        # ici, pour qu'il soit IMPOSSIBLE d'avoir des doublons ou un conflit Telegram,
+        # même si l'appli PC est ouverte en même temps que le serveur.
 
         # flux news (thread de fond, rafraîchi toutes les 5 min)
         from news import NewsFeed
@@ -2262,132 +2262,40 @@ class Cockpit(QtWidgets.QMainWindow):
             self.al_status.setStyleSheet(f"color:{RED};font-size:13px;font-weight:700;")
 
     def _build_alerts_page(self):
-        cfg = self._alert_cfg
+        """Page d'INFO : les alertes et le bot Telegram tournent désormais sur le
+        serveur cloud 24/7 (server.py). Côté PC on ne fait plus rien — on rappelle
+        juste comment tout se pilote depuis Telegram."""
         page = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(page)
-        outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(12)
+        outer.setContentsMargins(28, 28, 28, 28); outer.setSpacing(16)
 
-        intro = QtWidgets.QLabel(
-            "Alertes ntfy : quand TES conditions sont réunies dans TA fenêtre horaire, "
-            "l'app t'envoie une notif sur le téléphone — même PC loin. Première alerte à "
-            "l'approche d'un niveau, puis mises à jour live (CVD, mur le plus proche, "
-            "accélération). Le bot Telegram (à part) te laisse discuter avec le copilote.")
-        intro.setWordWrap(True); intro.setStyleSheet(f"color:{DIM};font-size:12px;")
-        outer.addWidget(intro)
+        title = QtWidgets.QLabel("🔔  Alertes & bot — gérés par ton serveur 24/7")
+        title.setStyleSheet(f"color:{TXT};font-size:20px;font-weight:800;")
+        outer.addWidget(title)
 
-        def inp(val="", w=150):
-            e = QtWidgets.QLineEdit(str(val)); e.setFixedWidth(w)
-            e.setStyleSheet(f"QLineEdit{{background:{PANEL};border:1px solid {BORDER};"
-                            f"border-radius:8px;color:{TXT};padding:7px 10px;font-size:13px;}}")
-            return e
+        info = QtWidgets.QLabel(
+            "Les alertes ntfy et le bot Telegram tournent maintenant sur ton serveur "
+            "cloud, en permanence — même PC éteint. Cette appli ne s'occupe PLUS des "
+            "alertes ni du bot, exprès, pour qu'il soit impossible d'avoir des doublons "
+            "ou un conflit. Tu n'as rien à activer ou désactiver ici.")
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color:{TXT};font-size:14px;background:{PANEL};"
+                           f"border:1px solid {BORDER};border-radius:12px;padding:16px;line-height:150%;")
+        outer.addWidget(info)
 
-        def chk(txt, on):
-            c = QtWidgets.QCheckBox(txt); c.setChecked(bool(on))
-            c.setStyleSheet(f"QCheckBox{{color:{TXT};font-size:13px;font-weight:600;}}")
-            return c
-
-        def spin(v):
-            sp = QtWidgets.QSpinBox(); sp.setRange(0, 23); sp.setValue(int(v)); sp.setSuffix(" h")
-            sp.setStyleSheet(f"QSpinBox{{background:{PANEL};border:1px solid {BORDER};"
-                             f"border-radius:8px;color:{TXT};padding:6px 8px;font-weight:700;}}")
-            return sp
-
-        body = QtWidgets.QHBoxLayout(); body.setSpacing(16); outer.addLayout(body, 1)
-
-        def flbl(t):
-            l = QtWidgets.QLabel(t); l.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:600;")
-            return l
-
-        # ===== colonne gauche : ntfy + fenêtre + bot Telegram + master =====
-        left = QtWidgets.QVBoxLayout(); left.setSpacing(8)
-
-        left.addWidget(self._h("ALERTES ntfy  ·  installe l'app ntfy et abonne-toi au même topic"))
-        self.al_ntfy = inp(cfg.get("ntfy_topic", ""), 260)
-        self.al_ntfy.setPlaceholderText("nom de topic secret (ex : raoul-btc-x9f2)")
-        fn = QtWidgets.QFormLayout(); fn.setSpacing(6)
-        fn.addRow(flbl("Topic ntfy"), self.al_ntfy)
-        left.addLayout(fn)
-
-        left.addWidget(self._h("FENÊTRE HORAIRE  ·  alertes actives seulement dans ce créneau"))
-        hrow = QtWidgets.QHBoxLayout(); hrow.setSpacing(8)
-        self.al_start = spin(cfg.get("start_h", 13))
-        self.al_end = spin(cfg.get("end_h", 16))
-        hrow.addWidget(flbl("De")); hrow.addWidget(self.al_start)
-        hrow.addWidget(flbl("à")); hrow.addWidget(self.al_end)
-        hrow.addStretch(1); left.addLayout(hrow)
-
-        left.addWidget(self._h("BOT TELEGRAM  ·  discuter avec le copilote  (@BotFather → /newbot → token)"))
-        self.al_tgtoken = inp(cfg.get("tg_token", ""), 260)
-        self.al_tgtoken.setPlaceholderText("token du bot (colle-le ici)")
-        self.al_tgchat = inp(cfg.get("tg_chat", ""), 260)
-        ft = QtWidgets.QFormLayout(); ft.setSpacing(6)
-        ft.addRow(flbl("Token du bot"), self.al_tgtoken)
-        ft.addRow(flbl("Chat ID (auto si vide)"), self.al_tgchat)
-        left.addLayout(ft)
-        self.al_tgbot_on = chk("💬 Activer le bot de discussion Telegram", cfg.get("tg_bot_on", False))
-        left.addWidget(self.al_tgbot_on)
-
-        self.al_enable = chk("🔔 ACTIVER LES ALERTES", cfg.get("enabled", False))
-        self.al_enable.setStyleSheet(f"QCheckBox{{color:{GREEN};font-size:15px;font-weight:800;}}")
-        left.addWidget(self.al_enable)
-        left.addStretch(1)
-        body.addLayout(left, 1)
-
-        # ===== colonne droite : critères =====
-        right = QtWidgets.QVBoxLayout(); right.setSpacing(8)
-        right.addWidget(self._h("NIVEAUX À SURVEILLER  (prises de liquidité, séparés par virgule)"))
-        self.al_levels = inp(", ".join(f"{x:.0f}" for x in cfg.get("levels", [])), 380)
-        right.addWidget(self.al_levels)
-
-        self.al_approach_on = chk("Alerte à l'approche d'un niveau + maj live", cfg.get("approach_on", True))
-        right.addWidget(self.al_approach_on)
-        arow = QtWidgets.QHBoxLayout(); arow.setSpacing(8)
-        self.al_approach = inp(cfg.get("approach", 75.0), 80)
-        self.al_interval = inp(cfg.get("live_interval", 90), 80)
-        arow.addWidget(flbl("Distance d'approche ($)")); arow.addWidget(self.al_approach)
-        arow.addWidget(flbl("Intervalle maj live (s)")); arow.addWidget(self.al_interval)
-        arow.addStretch(1); right.addLayout(arow)
-
-        self.al_wall_on = chk("Alerte quand un gros mur apparaît près du prix", cfg.get("wall_on", True))
-        right.addWidget(self.al_wall_on)
-        wrow = QtWidgets.QHBoxLayout(); wrow.setSpacing(8)
-        self.al_wall_min = inp(cfg.get("wall_min", 100.0), 80)
-        wrow.addWidget(flbl("Taille mur mini (BTC)")); wrow.addWidget(self.al_wall_min)
-        wrow.addStretch(1); right.addLayout(wrow)
-
-        self.al_accel_on = chk("Alerte quand le volume accélère (prix bouge plus vite que d'habitude)",
-                               cfg.get("accel_on", True))
-        right.addWidget(self.al_accel_on)
-        crow = QtWidgets.QHBoxLayout(); crow.setSpacing(8)
-        self.al_accel_factor = inp(cfg.get("accel_factor", 2.0), 80)
-        crow.addWidget(flbl("Facteur d'accélération (x la normale)")); crow.addWidget(self.al_accel_factor)
-        crow.addStretch(1); right.addLayout(crow)
-
-        btnrow = QtWidgets.QHBoxLayout(); btnrow.setSpacing(10)
-        savebtn = QtWidgets.QPushButton("💾 Enregistrer")
-        savebtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        savebtn.setStyleSheet(f"QPushButton{{background:{ACCENT};color:#08111f;border:none;"
-                              f"border-radius:8px;padding:9px 18px;font-weight:800;}}")
-        savebtn.clicked.connect(self._alerts_apply)
-        testbtn = QtWidgets.QPushButton("📲 Envoyer un test")
-        testbtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        testbtn.setStyleSheet(f"QPushButton{{background:{GREEN};color:#06210f;border:none;"
-                              f"border-radius:8px;padding:9px 18px;font-weight:800;}}")
-        testbtn.clicked.connect(self._alerts_test)
-        btnrow.addWidget(savebtn); btnrow.addWidget(testbtn); btnrow.addStretch(1)
-        right.addLayout(btnrow)
-
-        self.al_status = QtWidgets.QLabel("Règle tes critères puis Enregistrer. Teste avant la session.")
-        self.al_status.setWordWrap(True)
-        self.al_status.setStyleSheet(f"color:{DIM};font-size:13px;font-weight:700;")
-        right.addWidget(self.al_status)
-
-        right.addWidget(self._h("HISTORIQUE DES ALERTES ENVOYÉES"))
-        self.al_log = QtWidgets.QTextEdit(); self.al_log.setReadOnly(True)
-        self.al_log.setStyleSheet(f"QTextEdit{{background:{PANEL};border:1px solid {BORDER};"
-                                  f"border-radius:12px;color:{TXT};font-size:12px;padding:10px;}}")
-        right.addWidget(self.al_log, 1)
-        body.addLayout(right, 1)
+        howto = QtWidgets.QLabel(
+            "<b>Tu pilotes tout depuis Telegram</b>, sur ton bot :<br><br>"
+            "• <b>/status</b> — état du serveur + prix + tes niveaux<br>"
+            "• <b>/niveaux 61000, 62000</b> — changer tes niveaux surveillés<br>"
+            "• <b>/update</b> — forcer la dernière version du code<br>"
+            "• <b>une question libre</b> — le copilote répond avec les données live<br><br>"
+            "<span style='color:#8a94a6;'>Accès serveur (rare) : console.cloud.google.com "
+            "→ Compute Engine → VM instances → bouton SSH.</span>")
+        howto.setWordWrap(True); howto.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        howto.setStyleSheet(f"color:{TXT};font-size:14px;background:{PANEL2};"
+                            f"border:1px solid {BORDER};border-radius:12px;padding:16px;line-height:170%;")
+        outer.addWidget(howto)
+        outer.addStretch(1)
         return page
 
     # ===========================================================
