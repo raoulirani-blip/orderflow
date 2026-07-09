@@ -218,8 +218,8 @@ class Cockpit(QtWidgets.QMainWindow):
         # --- Journal de trades ---
         self.tabs.addTab(self._build_journal_page(), "  📓  JOURNAL  ")
 
-        # --- Alertes WhatsApp ---
-        self.tabs.addTab(self._build_alerts_page(), "  🔔  ALERTES  ")
+        # (page ALERTES retirée : les alertes tournent sur le serveur cloud 24/7,
+        #  pilotées depuis Telegram ; les niveaux surveillés = ceux de la page EXÉCUTION)
 
         # --- Page 8: News crypto + macro ---
         self.tabs.addTab(self._build_news_page(), "  🗞️  NEWS & MACRO  ")
