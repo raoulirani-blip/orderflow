@@ -16,8 +16,11 @@ Lancement :  python server.py
 
 import json
 import os
+import threading
 import time
 from collections import deque
+
+import requests
 
 from engine import OrderFlowEngine
 from alerts import Notifier
@@ -25,6 +28,9 @@ from ai_copilot import AICopilot
 from telegram_bot import TelegramCopilotBot
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# fichier des niveaux partagé PC <-> serveur, via GitHub (lu en RAW, sans auth)
+NIVEAUX_RAW = "https://raw.githubusercontent.com/raoulirani-blip/orderflow/main/niveaux.json"
 
 # noms courts (Telegram) -> libellés modèles du copilote
 MODEL_MAP = {
@@ -65,6 +71,10 @@ class AlertServer:
         self._last_hist = 0.0
         self.tg = None
         self._start_telegram()
+        self._ensure_autoupdate()           # script de MAJ auto (auto-réparé)
+        # synchro des niveaux depuis l'appli PC (via GitHub) en tâche de fond
+        self._last_niveaux_raw = None
+        threading.Thread(target=self._poll_levels_loop, daemon=True).start()
 
     # ---------- config ----------
     def _load_cfg(self):
@@ -76,17 +86,65 @@ class AlertServer:
                     d.update(json.load(f))
             except (OSError, ValueError):
                 pass
-        # niveaux : priorité au fichier mes_niveaux.txt s'il existe (mêmes que l'appli)
-        mp = os.path.join(HERE, "mes_niveaux.txt")
-        if os.path.exists(mp) and not d.get("levels"):
-            import re
+        # niveaux : priorité au fichier niveaux.json (synchro depuis l'appli PC via GitHub)
+        np = os.path.join(HERE, "niveaux.json")
+        if os.path.exists(np):
             try:
-                with open(mp, encoding="utf-8") as f:
-                    d["levels"] = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", f.read())
-                                   if float(x) > 100]
-            except (OSError, ValueError):
+                with open(np, encoding="utf-8") as f:
+                    lv = [float(x) for x in json.load(f).get("levels", []) if float(x) > 100]
+                if lv:
+                    d["levels"] = sorted(set(lv))
+            except (OSError, ValueError, TypeError):
                 pass
         return d
+
+    def _poll_levels_loop(self):
+        """Récupère les niveaux posés depuis l'appli PC (fichier niveaux.json sur
+        GitHub) toutes les 30 s, en RAW (aucune authentification). Met à jour les
+        niveaux surveillés EN DIRECT, sans redémarrage."""
+        while True:
+            time.sleep(30)
+            try:
+                r = requests.get(NIVEAUX_RAW, timeout=15)
+                if r.status_code != 200 or r.text == self._last_niveaux_raw:
+                    continue
+                self._last_niveaux_raw = r.text
+                lv = [float(x) for x in json.loads(r.text).get("levels", []) if float(x) > 100]
+                lv = sorted(set(lv))
+                if lv != sorted(set(self.cfg.get("levels", []))):
+                    self.cfg["levels"] = lv
+                    self._save_cfg()
+                    self._alert_state = {k: v for k, v in self._alert_state.items()
+                                         if not k.startswith("lvl_")}
+                    print(f"[NIVEAUX] synchro depuis l'appli PC : {lv}")
+            except Exception:
+                pass
+
+    def _ensure_autoupdate(self):
+        """(Ré)écrit le script de mise à jour auto : il ne REDÉMARRE le serveur QUE si
+        du CODE a changé — un simple changement de niveaux (niveaux.json) n'entraîne
+        pas de redémarrage (les niveaux sont déjà lus en direct via GitHub)."""
+        content = (
+            "#!/bin/bash\n"
+            "cd $HOME/orderflow\n"
+            "git fetch origin --quiet 2>/dev/null\n"
+            "before=$(git rev-parse HEAD 2>/dev/null)\n"
+            "after=$(git rev-parse origin/main 2>/dev/null)\n"
+            "if [ \"$before\" != \"$after\" ]; then\n"
+            "  changed=$(git diff --name-only \"$before\" \"$after\" 2>/dev/null)\n"
+            "  git reset --hard origin/main --quiet\n"
+            "  if [ -n \"$(echo \"$changed\" | grep -v '^niveaux.json$')\" ]; then\n"
+            "    sudo systemctl restart orderflow\n"
+            "  fi\n"
+            "fi\n"
+        )
+        try:
+            p = os.path.join(HERE, "autoupdate.sh")
+            with open(p, "w") as f:
+                f.write(content)
+            os.chmod(p, 0o755)
+        except OSError:
+            pass
 
     def _save_cfg(self):
         try:

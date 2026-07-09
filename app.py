@@ -2834,13 +2834,47 @@ class Cockpit(QtWidgets.QMainWindow):
             except ValueError:
                 pass
         self._manual_levels = sorted(set(vals))
+        d = os.path.dirname(os.path.abspath(__file__))
         try:
-            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mes_niveaux.txt")
-            with open(p, "w", encoding="utf-8") as f:
+            with open(os.path.join(d, "mes_niveaux.txt"), "w", encoding="utf-8") as f:
                 f.write(", ".join(f"{x:.0f}" for x in self._manual_levels))
         except OSError:
             pass
+        # envoie les niveaux au SERVEUR 24/7 (via GitHub) — en tâche de fond
+        self._push_levels_to_server(d)
         self.exec_levels_input.setText(", ".join(f"{x:.0f}" for x in self._manual_levels))
+
+    def _push_levels_to_server(self, repo_dir):
+        """Écrit niveaux.json et le pousse sur GitHub pour que le serveur cloud
+        (server.py) le récupère et surveille ces niveaux 24/7, même PC éteint.
+        Tourne dans un thread, ne bloque jamais l'appli, échoue en silence."""
+        import json as _json
+        levels = list(self._manual_levels)
+        try:
+            with open(os.path.join(repo_dir, "niveaux.json"), "w", encoding="utf-8") as f:
+                _json.dump({"levels": levels}, f)
+        except OSError:
+            return
+
+        def _push():
+            import subprocess
+            try:
+                env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+                subprocess.run(["git", "add", "niveaux.json"], cwd=repo_dir,
+                               timeout=20, capture_output=True, env=env)
+                r = subprocess.run(["git", "commit", "-m", "maj niveaux"], cwd=repo_dir,
+                                   timeout=20, capture_output=True, env=env)
+                if r.returncode != 0 and b"nothing to commit" in (r.stdout + r.stderr):
+                    return
+                subprocess.run(["git", "pull", "--rebase", "--quiet"], cwd=repo_dir,
+                               timeout=30, capture_output=True, env=env)
+                subprocess.run(["git", "push", "--quiet"], cwd=repo_dir,
+                               timeout=30, capture_output=True, env=env)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=_push, daemon=True).start()
 
     def _exec_levels(self):
         """UNIQUEMENT tes niveaux saisis, triés par proximité au prix."""
