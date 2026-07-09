@@ -11,6 +11,7 @@ reçu est passé à un callback (qui appelle le copilote) et la réponse est ren
 Le chat_id est appris automatiquement au premier message si non fourni.
 """
 
+import json
 import threading
 import time
 
@@ -46,6 +47,16 @@ class TelegramCopilotBot:
             return
         try:
             self._api("sendMessage", chat_id=self.chat_id, text=text)
+        except Exception:
+            pass
+
+    def set_commands(self, commands):
+        """Enregistre le menu des commandes : Telegram affiche la liste dès qu'on
+        tape « / » dans la conversation."""
+        if not self.token:
+            return
+        try:
+            self._api("setMyCommands", commands=json.dumps(commands))
         except Exception:
             pass
 

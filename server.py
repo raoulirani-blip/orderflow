@@ -166,6 +166,14 @@ class AlertServer:
                 self.cfg.get("tg_token", ""), self.cfg.get("tg_chat", ""),
                 self._telegram_question, self._telegram_learn_chat)
             self.tg.start()
+            self.tg.set_commands([
+                {"command": "live", "description": "Toutes les données du marché en direct"},
+                {"command": "status", "description": "État du serveur + tes niveaux surveillés"},
+                {"command": "niveaux", "description": "Définir tes niveaux (ex: 61000, 63000)"},
+                {"command": "proximite", "description": "Distance d'alerte en $ (ex: 100)"},
+                {"command": "update", "description": "Mettre à jour le serveur maintenant"},
+                {"command": "aide", "description": "Liste des commandes"},
+            ])
             print("[Telegram] bot démarré.")
 
     def _telegram_learn_chat(self, chat_id):
