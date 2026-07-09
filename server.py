@@ -25,6 +25,13 @@ from telegram_bot import TelegramCopilotBot
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# noms courts (Telegram) -> libellés modèles du copilote
+MODEL_MAP = {
+    "haiku": "Haiku 4.5 (éco)",
+    "sonnet": "Sonnet 5 (équilibré)",
+    "opus": "Opus 4.8 (max)",
+}
+
 
 def _cfg_path():
     return os.path.join(HERE, "alerts_config.json")
@@ -33,6 +40,7 @@ def _cfg_path():
 def _default_cfg():
     return {"enabled": True, "channel": "ntfy",
             "ntfy_topic": "", "tg_token": "", "tg_chat": "", "tg_bot_on": True,
+            "model": "sonnet",
             "start_h": 0, "end_h": 24, "levels": [],
             "approach": 75.0, "live_interval": 45,
             "approach_on": True, "wall_on": True, "wall_min": 100.0,
@@ -49,6 +57,8 @@ class AlertServer:
         self.notifier = Notifier(min_interval=3.0)   # ntfy : pas de limite
         self._apply_notifier()
         self.copilot = AICopilot(daily_budget_usd=2.20)   # charge claude_key.txt seul
+        self.copilot.model_label = MODEL_MAP.get(self.cfg.get("model", "sonnet"),
+                                                 MODEL_MAP["sonnet"])
         self.tg = None
         self._start_telegram()
 
@@ -111,6 +121,8 @@ class AlertServer:
             return self._cmd_niveaux(q)
         if low in ("/live", "/marche", "/data", "/direct"):
             return self._cmd_live()
+        if low.startswith("/model"):
+            return self._cmd_modele(q)
         if low in ("/update", "/maj"):
             return self._cmd_update()
         if low in ("/aide", "/help", "/start", "aide"):
@@ -118,6 +130,7 @@ class AlertServer:
                     "/live — TOUTES les données en direct (prix, CVD, murs, VWAP, POC…)\n"
                     "/status — état du serveur + tes niveaux\n"
                     "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
+                    "/modele sonnet — choisir le modèle IA (sonnet / opus / haiku)\n"
                     "/update — récupérer la dernière version du code\n"
                     "\n…ou pose une question libre (« je short ici ? ») → le copilote analyse.")
         # --- sinon : question libre au copilote ---
@@ -207,6 +220,18 @@ class AlertServer:
                 car = "accumulé" if b >= sv else "distribué"
                 L.append(f"{p:,.0f} (à {abs(p-mid):.0f}$) : {car} — achat {b:.0f} / vente {sv:.0f}")
         return "\n".join(L)
+
+    def _cmd_modele(self, q):
+        low = q.lower()
+        for short in ("opus", "sonnet", "haiku"):
+            if short in low:
+                self.cfg["model"] = short
+                self._save_cfg()
+                self.copilot.model_label = MODEL_MAP[short]
+                return f"✅ Modèle IA réglé sur {MODEL_MAP[short]}."
+        cur = self.cfg.get("model", "sonnet")
+        return (f"Modèle actuel : {MODEL_MAP.get(cur, cur)}\n"
+                "Pour changer : /modele opus  (ou sonnet, ou haiku)")
 
     def _cmd_update(self):
         import subprocess
