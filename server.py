@@ -109,14 +109,17 @@ class AlertServer:
             return self._cmd_status()
         if low.startswith("/niveau"):
             return self._cmd_niveaux(q)
+        if low in ("/live", "/marche", "/data", "/direct"):
+            return self._cmd_live()
         if low in ("/update", "/maj"):
             return self._cmd_update()
         if low in ("/aide", "/help", "/start", "aide"):
             return ("🤖 Copilote Order Flow — commandes :\n"
-                    "/status — état du serveur + prix + tes niveaux\n"
+                    "/live — TOUTES les données en direct (prix, CVD, murs, VWAP, POC…)\n"
+                    "/status — état du serveur + tes niveaux\n"
                     "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
                     "/update — récupérer la dernière version du code\n"
-                    "\n…ou pose simplement une question libre (« il se passe quoi à 63k ? »).")
+                    "\n…ou pose une question libre (« je short ici ? ») → le copilote analyse.")
         # --- sinon : question libre au copilote ---
         ok, text = self.copilot.chat_sync(q, self._snapshot_text())
         return text if ok else f"⚠ {text}"
@@ -147,6 +150,63 @@ class AlertServer:
         self._alert_state = {k: v for k, v in self._alert_state.items()
                              if not k.startswith("lvl_")}
         return "✅ Niveaux mis à jour : " + ", ".join(f"{x:.0f}" for x in self.cfg["levels"])
+
+    def _cmd_live(self):
+        """Tableau de bord complet en direct (instantané, gratuit, sans IA)."""
+        s = self.state or {}
+        mid = s.get("mid")
+        if not mid or s.get("warming"):
+            return "🟡 En synchro… réessaie dans quelques secondes."
+        import time as _t
+        L = [f"📊 BTC EN DIRECT — {_t.strftime('%H:%M:%S')}",
+             f"Prix {mid:,.0f}$ · spread {s.get('spread',0):.1f}$",
+             f"Carnet {s.get('imbalance',0)*100:.0f}% achat · "
+             f"agress 5s {s.get('aggressor_ratio',0)*100:.0f}% · tape {s.get('tape_speed',0):.0f}/s"]
+        cvds = self.engine.get_cvd_windows()
+        parts = [f"{m}m {cvds[m]['cvd']:+.0f}" for m in (1, 5, 15, 30)
+                 if cvds.get(m, {}).get("ready")]
+        if parts:
+            L.append("CVD : " + " · ".join(parts))
+        v = self.engine.get_vwap()
+        if v:
+            L.append(f"VWAP {v['vwap']:,.0f} ({v['dev_pct']:+.2f}%)")
+        vp = self.engine.get_volume_profile(3600)
+        if vp:
+            L.append(f"POC {vp['poc']:,.0f} · VAH {vp['vah']:,.0f} · VAL {vp['val']:,.0f}")
+        pos = self.engine.get_positioning()
+        f = pos.get("funding"); oi = pos.get("oi")
+        extra = []
+        if f:
+            extra.append(f"funding {f['rate_pct']:+.3f}%")
+        if oi:
+            extra.append(f"OI {oi['now']:,.0f} ({oi['chg_5m_pct']:+.1f}% 5m)")
+        if extra:
+            L.append(" · ".join(extra))
+        if s.get("sess_hi") and s.get("sess_lo"):
+            L.append(f"Session : haut {s['sess_hi']:,.0f} · bas {s['sess_lo']:,.0f}")
+        ab = s.get("absorption")
+        if ab:
+            L.append(f"⚠️ absorption ({ab[0]})")
+        rep = self.engine.wall_history.report(15, mid=mid, top_n=20, max_dist=400)
+        if rep.get("ready"):
+            solid = [w for w in rep["top"] if w["status"] in ("actif", "valide")]
+            solid.sort(key=lambda w: abs(w["price"] - mid))
+            if solid:
+                L.append("\n🧱 Murs proches :")
+                for w in solid[:5]:
+                    ic = "🟢" if w["side"] == "bid" else "🔴"
+                    side = "support" if w["side"] == "bid" else "résist."
+                    L.append(f"{ic} {side} {w['price']:,.0f} — {w['max_qty']:.0f} BTC "
+                             f"({w['max_qty']*w['price']/1e6:.1f}M$) à {abs(w['price']-mid):.0f}$")
+        my = self.cfg.get("levels", [])
+        if my:
+            lf = self.engine.get_levels_flow(my, tol=30, window_s=3600)
+            L.append("\n🎯 Tes niveaux :")
+            for p in sorted(my, key=lambda x: abs(x - mid)):
+                b, sv = lf.get(p, (0, 0))
+                car = "accumulé" if b >= sv else "distribué"
+                L.append(f"{p:,.0f} (à {abs(p-mid):.0f}$) : {car} — achat {b:.0f} / vente {sv:.0f}")
+        return "\n".join(L)
 
     def _cmd_update(self):
         import subprocess
