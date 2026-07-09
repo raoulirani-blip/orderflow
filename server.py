@@ -17,6 +17,7 @@ Lancement :  python server.py
 import json
 import os
 import time
+from collections import deque
 
 from engine import OrderFlowEngine
 from alerts import Notifier
@@ -57,8 +58,11 @@ class AlertServer:
         self.notifier = Notifier(min_interval=3.0)   # ntfy : pas de limite
         self._apply_notifier()
         self.copilot = AICopilot(daily_budget_usd=2.20)   # charge claude_key.txt seul
-        self.copilot.model_label = MODEL_MAP.get(self.cfg.get("model", "sonnet"),
-                                                 MODEL_MAP["sonnet"])
+        # OPUS 4.8 en permanence (verrouillé) : on veut la meilleure analyse possible
+        self.copilot.model_label = MODEL_MAP["opus"]
+        # chaîne temporelle des métriques clés (pour analyser l'ÉVOLUTION, pas l'instant)
+        self._hist = deque(maxlen=300)      # échantillon ~toutes les 15s -> ~75 min
+        self._last_hist = 0.0
         self.tg = None
         self._start_telegram()
 
@@ -133,7 +137,6 @@ class AlertServer:
                     "/status — état du serveur + tes niveaux\n"
                     "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
                     "/proximite 100 — distance d'alerte (à combien de $ ça te prévient)\n"
-                    "/modele sonnet — choisir le modèle IA (sonnet / opus / haiku)\n"
                     "/update — récupérer la dernière version du code\n"
                     "\n…ou pose une question libre (« je short ici ? ») → le copilote analyse.")
         # --- sinon : question libre au copilote ---
@@ -235,16 +238,9 @@ class AlertServer:
         return f"✅ Alerte quand le prix arrive à {self.cfg['approach']:.0f}$ (ou moins) d'un de tes niveaux."
 
     def _cmd_modele(self, q):
-        low = q.lower()
-        for short in ("opus", "sonnet", "haiku"):
-            if short in low:
-                self.cfg["model"] = short
-                self._save_cfg()
-                self.copilot.model_label = MODEL_MAP[short]
-                return f"✅ Modèle IA réglé sur {MODEL_MAP[short]}."
-        cur = self.cfg.get("model", "sonnet")
-        return (f"Modèle actuel : {MODEL_MAP.get(cur, cur)}\n"
-                "Pour changer : /modele opus  (ou sonnet, ou haiku)")
+        # verrouillé sur Opus 4.8 (le plus puissant) — on veut la meilleure analyse
+        self.copilot.model_label = MODEL_MAP["opus"]
+        return "🔒 Le copilote utilise Opus 4.8 (le modèle le plus puissant) en permanence."
 
     def _cmd_update(self):
         import subprocess
@@ -299,10 +295,61 @@ class AlertServer:
                 f"CVD 1m {cvd1:+.0f} · agress {agg:.0f}% achat\n"
                 f"Mur proche : {wtxt}\n{vwtxt} · tape {tape:.0f}/s")
 
+    def _sample_history(self):
+        """Enregistre un point de la chaîne temporelle toutes les ~15s."""
+        now = time.time()
+        if now - self._last_hist < 15:
+            return
+        s = self.state or {}
+        mid = s.get("mid")
+        if not mid or s.get("warming"):
+            return
+        c1 = self.engine.get_cvd_windows().get(1, {})
+        self._hist.append({
+            "t": now, "price": mid,
+            "cvd1": c1.get("cvd", 0) if c1.get("ready") else 0,
+            "agg": s.get("aggressor_ratio", 0.5),
+            "imb": s.get("imbalance", 0.5),
+            "tape": s.get("tape_speed", 0.0),
+        })
+        self._last_hist = now
+
+    def _evolution_text(self):
+        """Chaîne temporelle lisible : comment prix/CVD/agresseurs ont ÉVOLUÉ.
+        C'est ce qui permet à Opus d'analyser la dynamique, pas juste l'instant."""
+        if len(self._hist) < 3:
+            return ""
+        now = time.time()
+
+        def at(mins):
+            target = now - mins * 60
+            return min(self._hist, key=lambda h: abs(h["t"] - target))
+
+        oldest_min = (now - self._hist[0]["t"]) / 60
+        L = [f"\nÉVOLUTION sur ~{oldest_min:.0f} min (pour analyser la DYNAMIQUE, "
+             "pas l'instant figé) :"]
+        for mins in (30, 20, 15, 10, 5, 2, 0):
+            if mins / 60 > 0 and mins > oldest_min + 1:
+                continue
+            h = self._hist[-1] if mins == 0 else at(mins)
+            lbl = "maintenant" if mins == 0 else f"-{mins}min"
+            L.append(f"  {lbl}: prix {h['price']:,.0f} · CVD1m {h['cvd1']:+.0f} · "
+                     f"agress {h['agg']*100:.0f}% · carnet {h['imb']*100:.0f}%ach · "
+                     f"tape {h['tape']:.0f}/s")
+        # vitesse récente du prix
+        p_now = self._hist[-1]["price"]; p_5 = at(5)["price"]
+        dp = p_now - p_5
+        L.append(f"  → sur 5 min le prix a {('MONTÉ' if dp>0 else 'BAISSÉ' if dp<0 else 'stagné')} "
+                 f"de {abs(dp):,.0f}$")
+        return "\n".join(L)
+
     def _snapshot_text(self):
         """Instantané compact pour le copilote (identique en esprit à l'appli)."""
         s = self.state or {}
-        L = ["Instantané BTC perp (agrégé Binance+OKX+Bybit+Hyperliquid) :"]
+        L = ["Données live BTC perp (agrégé Binance+OKX+Bybit+Hyperliquid). "
+             "IMPORTANT : base ton analyse sur l'ÉVOLUTION/la dynamique (section en bas), "
+             "pas seulement sur l'instant. Regarde comment le prix réagit aux niveaux/murs "
+             "(vitesse, cassure ou rejet), la tendance du CVD et des agresseurs dans le temps."]
         mid = s.get("mid")
         if mid:
             L.append(f"prix={mid:.0f} spread={s.get('spread',0):.1f}$ "
@@ -351,6 +398,9 @@ class AlertServer:
                 car = "accumulé" if b >= sv else "distribué"
                 L.append(f"MON NIVEAU {p:.0f} (dist {abs(p-mid):.0f}$): "
                          f"achat {b:.0f} vs vente {sv:.0f} BTC = {car}")
+        evo = self._evolution_text()
+        if evo:
+            L.append(evo)
         return "\n".join(L)
 
     # ---------- moteur d'alertes ----------
@@ -424,6 +474,7 @@ class AlertServer:
                 time.sleep(2)
                 try:
                     self._alerts_tick()
+                    self._sample_history()
                 except Exception as e:
                     print("[erreur alerte]", e)
                 now = time.time()
