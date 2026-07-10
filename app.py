@@ -512,6 +512,15 @@ class Cockpit(QtWidgets.QMainWindow):
         self.vwap_line.setVisible(False); self.hm.addItem(self.vwap_line)
         self.poc_line=pg.InfiniteLine(angle=0,pen=pg.mkPen(VIOLET,width=1,style=QtCore.Qt.PenStyle.DotLine))
         self.poc_line.setVisible(False); self.hm.addItem(self.poc_line)
+        # petits labels de prix aux niveaux les plus chargés en ordres (liquidité)
+        self.hm_labels = []
+        _hf = QtGui.QFont(); _hf.setPointSize(8)
+        for _ in range(6):
+            t = pg.TextItem(color=(240, 240, 245), anchor=(0, 0.5), fill=(0, 0, 0, 150))
+            t.textItem.setFont(_hf)
+            t.setVisible(False); t.setZValue(20)
+            self.hm.addItem(t)
+            self.hm_labels.append(t)
         self.hm_img.setLookupTable(pg.colormap.get("inferno").getLookupTable(0.0,1.0,256))
         col.addWidget(self.hm,5)
         two=QtWidgets.QHBoxLayout(); two.setSpacing(10); col.addLayout(two,4)
@@ -691,6 +700,32 @@ class Cockpit(QtWidgets.QMainWindow):
         self.hm_img.setRect(QtCore.QRectF(0,lo,len(hm),hi-lo))
         self.mid_line.setValue(s["mid"])
         self.hm.setYRange(lo,hi,padding=0); self.hm.setXRange(0,len(hm),padding=0)
+
+        # --- LABELS des niveaux les plus chargés en ordres (là où il y a le plus
+        #     de liquidité, moyennée sur la période récente) ---
+        labels = getattr(self, "hm_labels", [])
+        if labels:
+            for lbl in labels:
+                lbl.setVisible(False)
+            try:
+                K = min(len(hm), 60)
+                profile = np.asarray(hm[-K:], dtype=float).mean(axis=0)  # liq. moy. par ligne
+                min_gap = max(2, rows // 22)          # évite 3 labels collés sur le même niveau
+                picked = []
+                for idx in np.argsort(profile)[::-1]:
+                    if profile[idx] <= 0:
+                        break
+                    if all(abs(int(idx) - p) >= min_gap for p in picked):
+                        picked.append(int(idx))
+                    if len(picked) >= len(labels):
+                        break
+                for lbl, idx in zip(labels, picked):
+                    price = lo + (idx + 0.5) / rows * (hi - lo)
+                    lbl.setText(f"{price:,.0f}")
+                    lbl.setPos(len(hm) * 0.80, price)   # calé vers la droite, en petit
+                    lbl.setVisible(True)
+            except Exception:
+                pass
 
     def _refresh_window(self, minutes):
         import time as _t
@@ -2740,7 +2775,7 @@ class Cockpit(QtWidgets.QMainWindow):
         if r:
             html = r["text"].replace("\n", "<br>")
             for tag, colr in [("BIAIS:", ACCENT), ("LECTURE:", AMBER),
-                              ("NIVEAUX:", VIOLET), ("PLAN:", GREEN)]:
+                              ("PROJECTION:", "#5ac8fa"), ("NIVEAUX:", VIOLET), ("PLAN:", GREEN)]:
                 html = html.replace(tag, f"<b style='color:{colr};'>{tag}</b>")
             self.ai_output.setHtml(
                 f"<div style='color:{DIM};font-size:11px;margin-bottom:8px;'>"
