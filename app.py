@@ -854,8 +854,13 @@ class Cockpit(QtWidgets.QMainWindow):
                 for j, (v, cc) in enumerate(cells):
                     t.setItem(i, j, cell(v, cc))
 
-            # --- TABLEAU ACTIFS : murs présents MAINTENANT (triés par importance) ---
-            solid_list = [wl for wl in top if wl["status"] == "actif"]
+            # cats = TOUTES les catégories complètes (pas seulement le top par
+            # importance) -> les tableaux affichent TOUS les murs, comme le compteur.
+            cats = rep.get("categories", {})
+
+            # --- TABLEAU ACTIFS : TOUS les murs présents, triés par proximité ---
+            solid_list = sorted(cats.get("actif", []),
+                                key=lambda wl: abs(wl["price"] - mid) if mid else 0)
             st = w["solid"]; st.setRowCount(len(solid_list))
             for i, wl in enumerate(solid_list):
                 sidecol = GREEN if wl["side"] == "bid" else RED
@@ -874,8 +879,8 @@ class Cockpit(QtWidgets.QMainWindow):
 
             # --- TABLEAU VALIDÉS : murs qui ont TENU puis sont partis (= niveaux
             #     de référence pour le futur : support/résistance à re-surveiller) ---
-            valid_list = [wl for wl in top if wl["status"] == "valide"]
-            valid_list.sort(key=lambda wl: (wl["tests"], wl["max_qty"]), reverse=True)
+            valid_list = sorted(cats.get("valide", []),
+                                key=lambda wl: (wl["tests"], wl["max_qty"]), reverse=True)
             vt = w["valid"]; vt.setRowCount(len(valid_list))
             for i, wl in enumerate(valid_list):
                 sidecol = GREEN if wl["side"] == "bid" else RED
@@ -890,8 +895,12 @@ class Cockpit(QtWidgets.QMainWindow):
                 for j, (v, cc) in enumerate(cells):
                     vt.setItem(i, j, cell(v, cc))
 
-            # --- TABLEAU INVALIDÉS : cassés + spoofs ---
-            broken_list = [wl for wl in top if wl["status"] in ("invalide", "spoof")]
+            # --- TABLEAU INVALIDÉS : TOUS les cassés + spoofs (cassés d'abord),
+            #     plafonné pour rester lisible quand il y a des centaines de spoofs ---
+            broken_list = (sorted(cats.get("invalide", []),
+                                  key=lambda wl: abs(wl["price"] - mid) if mid else 0)
+                           + sorted(cats.get("spoof", []),
+                                    key=lambda wl: abs(wl["price"] - mid) if mid else 0))[:120]
             bt = w["broken"]; bt.setRowCount(len(broken_list))
             for i, wl in enumerate(broken_list):
                 sidecol = GREEN if wl["side"] == "bid" else RED
