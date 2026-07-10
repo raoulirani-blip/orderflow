@@ -587,39 +587,46 @@ class OrderFlowEngine:
         bilan + a finer interpretive analysis. Works for any window (5/15/30/60)."""
         window_s = minutes * 60.0
         # horloge réelle + parcours depuis la fin avec arrêt au cutoff
-        trades = self._trades_window(window_s)
+        # VOLUME : historique pré-chargé (klines) + live -> le bilan reflète les VRAIES
+        # X dernières minutes DÈS le lancement (avant, il repartait de "0 minute" tant
+        # que l'appli n'avait pas tourné assez longtemps).
+        trades = self._trades_window_seed(window_s)
         if len(trades) < 20:
             return {"ready": False, "n": len(trades), "minutes": minutes}
+        # COMPTAGES/TAILLES (nb d'ordres, gros ordres, cadence) : vrais trades LIVE
+        # uniquement — les pseudo-trades du pré-chargement (1 achat + 1 vente par minute)
+        # fausseraient ces comptages. Ils se remplissent en laissant tourner l'appli.
+        live = self._trades_window(window_s)
 
         first_ts = trades[0][0]; last_ts = trades[-1][0]
         span_min = max(0.1, (last_ts - first_ts) / 60.0)
 
-        buy_n = sell_n = 0
         buy_vol = sell_vol = 0.0
         buy_usd = sell_usd = 0.0
         vol_by_price = defaultdict(float)
-        big_prints = 0
-        sizes = []
         for ts, price, qty, is_sell in trades:
             usd = price * qty
-            bucket = round(price / 10.0) * 10.0
-            vol_by_price[bucket] += qty
-            sizes.append(qty)
+            vol_by_price[round(price / 10.0) * 10.0] += qty
             if is_sell:
-                sell_n += 1; sell_vol += qty; sell_usd += usd
+                sell_vol += qty; sell_usd += usd
             else:
-                buy_n += 1; buy_vol += qty; buy_usd += usd
+                buy_vol += qty; buy_usd += usd
+
+        # comptages & tailles = LIVE seulement (non faussés par le pré-chargement)
+        buy_n = sum(1 for _, _, _, s in live if not s)
+        sell_n = sum(1 for _, _, _, s in live if s)
+        sizes = [q for _, _, q, _ in live]
+        n_live = len(live)
+        avg_size = (sum(sizes) / n_live) if n_live else 0.0
+        big_prints = sum(1 for q in sizes if q >= 5 * avg_size) if avg_size else 0
+        live_span = (max(0.1, (live[-1][0] - live[0][0]) / 60.0) if n_live >= 2 else span_min)
+        trades_per_min = n_live / live_span if n_live else 0
 
         total_vol = buy_vol + sell_vol
         total_usd = buy_usd + sell_usd
         delta_vol = buy_vol - sell_vol
         buy_share = (buy_vol / total_vol) if total_vol else 0.5
-        n_trades = len(trades)
-        avg_size = (total_vol / n_trades) if n_trades else 0
-        trades_per_min = n_trades / span_min if span_min else 0
-
-        # big prints = trades >= 5x the average size (institutional-ish)
-        big_prints = sum(1 for q in sizes if q >= 5 * avg_size) if avg_size else 0
+        n_trades = n_live
 
         top_levels = sorted(vol_by_price.items(), key=lambda kv: kv[1], reverse=True)[:5]
         # concentration: how much of the volume is in the single busiest level
