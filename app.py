@@ -294,10 +294,10 @@ class Cockpit(QtWidgets.QMainWindow):
 
         intro = QtWidgets.QLabel(
             "Étude des murs. Choisis une fenêtre de temps (1/5/15/30/60 min), puis un "
-            "sous-onglet : 📋 TOUS les murs par importance · 🟢 NIVEAUX SOLIDES (actifs + "
-            "validés qui ont tenu) · 🔴 INVALIDÉS (cassés + spoofs). Rappel : N/4 = sur "
-            "combien d'exchanges le mur est visible (le plus souvent 1 car seul Binance "
-            "publie un carnet profond).")
+            "sous-onglet : 📋 TOUS · 🟢 ACTIFS (présents maintenant) · ✅ VALIDÉS (ont tenu "
+            "puis partis = niveaux de support/résistance à re-surveiller dans le futur) · "
+            "🔴 INVALIDÉS (cassés + spoofs). Rappel : N/4 = sur combien d'exchanges le mur "
+            "est visible (le plus souvent 1 car seul Binance publie un carnet profond).")
         intro.setWordWrap(True)
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
@@ -392,7 +392,9 @@ class Cockpit(QtWidgets.QMainWindow):
             table = mk_table(["Statut","Côté","Prix","Taille BTC","Valeur $","Durée","Tests"])
             sub.addTab(table, "  📋  TOUS LES MURS  ")
             solid = mk_table(["Statut","Côté","Prix","Taille BTC","Valeur $","Tests","Durée"])
-            sub.addTab(solid, "  🟢  NIVEAUX SOLIDES  ")
+            sub.addTab(solid, "  🟢  ACTIFS (présents)  ")
+            valid = mk_table(["Côté","Prix","Taille max BTC","Valeur $","Tests","A tenu (s)"])
+            sub.addTab(valid, "  ✅  VALIDÉS (ont tenu → niveaux futurs)  ")
             broken = mk_table(["Côté","Prix","Taille BTC","Valeur $","Sort","Durée","Tests"])
             sub.addTab(broken, "  🔴  INVALIDÉS  ")
             # 4e sous-onglet : pour chaque mur, ce qui a été EXÉCUTÉ (acheté/vendu
@@ -404,8 +406,8 @@ class Cockpit(QtWidgets.QMainWindow):
 
             self.wall_tabs.addTab(wp, f"  {m} min  ")
             self.wall_widgets[m] = {"header": header, "longest": longest, "catbar": catbar,
-                                    "table": table, "solid": solid, "broken": broken,
-                                    "flux": flux}
+                                    "table": table, "solid": solid, "valid": valid,
+                                    "broken": broken, "flux": flux}
         return page
 
     def _topbar(self):
@@ -797,7 +799,7 @@ class Cockpit(QtWidgets.QMainWindow):
                        f"🧱 Fenêtre {m} min — accumulation des murs…")
                 w["header"].setText(f"{msg}  ({_t.strftime('%H:%M:%S')})")
                 # vide les tableaux
-                for key in ("table", "solid", "broken", "flux"):
+                for key in ("table", "solid", "valid", "broken", "flux"):
                     w[key].setRowCount(0)
                 w["_top_walls"] = []
                 continue
@@ -852,8 +854,8 @@ class Cockpit(QtWidgets.QMainWindow):
                 for j, (v, cc) in enumerate(cells):
                     t.setItem(i, j, cell(v, cc))
 
-            # --- TABLEAU SOLIDES : actifs + validés, triés par importance ---
-            solid_list = [wl for wl in top if wl["status"] in ("actif", "valide")]
+            # --- TABLEAU ACTIFS : murs présents MAINTENANT (triés par importance) ---
+            solid_list = [wl for wl in top if wl["status"] == "actif"]
             st = w["solid"]; st.setRowCount(len(solid_list))
             for i, wl in enumerate(solid_list):
                 sidecol = GREEN if wl["side"] == "bid" else RED
@@ -869,6 +871,24 @@ class Cockpit(QtWidgets.QMainWindow):
                 ]
                 for j, (v, cc) in enumerate(cells):
                     st.setItem(i, j, cell(v, cc))
+
+            # --- TABLEAU VALIDÉS : murs qui ont TENU puis sont partis (= niveaux
+            #     de référence pour le futur : support/résistance à re-surveiller) ---
+            valid_list = [wl for wl in top if wl["status"] == "valide"]
+            valid_list.sort(key=lambda wl: (wl["tests"], wl["max_qty"]), reverse=True)
+            vt = w["valid"]; vt.setRowCount(len(valid_list))
+            for i, wl in enumerate(valid_list):
+                sidecol = GREEN if wl["side"] == "bid" else RED
+                cells = [
+                    ("ACHAT/support" if wl["side"] == "bid" else "VENTE/résist.", sidecol),
+                    (f"{wl['price']:,.0f}", TXT),
+                    (f"{wl['max_qty']:.1f}", TXT),
+                    (f"{wl['usd']/1e6:.2f} M$", GREEN),
+                    (str(wl["tests"]), AMBER if wl["tests"] >= 2 else TXT),
+                    (f"{wl['lifespan']:.0f}s", TXT),
+                ]
+                for j, (v, cc) in enumerate(cells):
+                    vt.setItem(i, j, cell(v, cc))
 
             # --- TABLEAU INVALIDÉS : cassés + spoofs ---
             broken_list = [wl for wl in top if wl["status"] in ("invalide", "spoof")]
@@ -915,7 +935,9 @@ class Cockpit(QtWidgets.QMainWindow):
 
         for m in getattr(self, "WALL_WINDOWS", []):
             w = self.wall_widgets[m]
-            walls = w.get("_top_walls", [])
+            # on retire les SPOOFS (faux murs retirés sans être touchés) : ils n'ont
+            # rien de réel à montrer côté exécuté/en attente
+            walls = [wl for wl in w.get("_top_walls", []) if wl["status"] != "spoof"]
             ft = w["flux"]; ft.setRowCount(len(walls))
             for i, wl in enumerate(walls):
                 side_bid = wl["side"] == "bid"
