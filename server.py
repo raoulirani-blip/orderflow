@@ -302,15 +302,15 @@ class AlertServer:
         ab = s.get("absorption")
         if ab:
             L.append(f"⚠️ absorption ({ab[0]})")
-        rep = self.engine.wall_history.report(15, mid=mid, top_n=20, max_dist=400)
+        rep = self.engine.wall_history.report(30, mid=mid, top_n=60, max_dist=None)
         if rep.get("ready"):
             solid = [w for w in rep["top"] if w["status"] in ("actif", "valide")]
             solid.sort(key=lambda w: abs(w["price"] - mid))
             if solid:
-                L.append("\n🧱 Murs proches :")
-                for w in solid[:5]:
+                L.append(f"\n🧱 Murs ({len(solid)} solides, du + proche) :")
+                for w in solid[:12]:
                     ic = "🟢" if w["side"] == "bid" else "🔴"
-                    side = "support" if w["side"] == "bid" else "résist."
+                    side = "sup" if w["side"] == "bid" else "rés"
                     L.append(f"{ic} {side} {w['price']:,.0f} — {w['max_qty']:.0f} BTC "
                              f"({w['max_qty']*w['price']/1e6:.1f}M$) à {abs(w['price']-mid):.0f}$")
         my = self.cfg.get("levels", [])
@@ -460,14 +460,21 @@ class AlertServer:
         if parts:
             L.append("CVD(BTC) " + " ".join(parts))
         if mid:
-            rep = self.engine.wall_history.report(15, mid=mid, top_n=20, max_dist=400)
+            # TOUS les murs (aucune limite de distance) pour que le copilote ait accès
+            # à chaque détail, du plus proche au plus loin
+            rep = self.engine.wall_history.report(30, mid=mid, top_n=60, max_dist=None)
             if rep.get("ready"):
                 solid = [wl for wl in rep["top"] if wl["status"] in ("actif", "valide")]
                 solid.sort(key=lambda wl: abs(wl["price"] - mid))
-                for wl in solid[:6]:
-                    L.append(f"mur {'ACHAT' if wl['side']=='bid' else 'VENTE'} @{wl['price']:.0f} "
-                             f"{wl['max_qty']:.0f}BTC dist={abs(wl['price']-mid):.0f}$ "
-                             f"testé{wl['tests']}x statut={wl['status']}")
+                L.append(f"TOUS LES MURS solides ({len(solid)}), du + proche au + loin :")
+                for wl in solid[:22]:
+                    L.append(f"  mur {'ACHAT' if wl['side']=='bid' else 'VENTE'} @{wl['price']:.0f} "
+                             f"{wl['max_qty']:.0f}BTC (~{wl['max_qty']*wl['price']/1e6:.1f}M$) "
+                             f"dist={abs(wl['price']-mid):.0f}$ testé{wl['tests']}x {wl['status']}")
+                inval = [wl for wl in rep["top"] if wl["status"] == "invalide"][:5]
+                if inval:
+                    L.append("Murs récemment CASSÉS/invalidés (contexte) : " +
+                             ", ".join(f"{wl['price']:.0f}" for wl in inval))
         seg = self.engine.get_flow_segments(300)
         if seg:
             L.append(f"delta5min retail={seg['retail']['delta']:+.1f} "
