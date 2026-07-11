@@ -1037,6 +1037,32 @@ class OrderFlowEngine:
                 deduped.append(c)
         return list(reversed(deduped))[:20]
 
+    def multi_tf_text(self):
+        """Synthèse MULTI-TIMEFRAME (5min → 3h) construite sur l'historique pré-chargé
+        + le live : comment le marché a évolué à CHAQUE horizon. C'est la base pour une
+        vraie analyse multi-timeframe (biais 2h vs 30min vs quelques minutes)."""
+        lines = ["ANALYSE MULTI-TIMEFRAME (évolution réelle à chaque horizon) :"]
+        for m in (5, 15, 30, 60, 120, 180):
+            r = self.window_report(m)
+            if not r.get("ready"):
+                continue
+            lbl = f"{m}min" if m < 60 else f"{m // 60}h"
+            lines.append(
+                f"  {lbl}: {r['dominant']} ({r['buy_share']*100:.0f}% achat) · "
+                f"delta {r['delta_vol']:+.0f}BTC · prix {r['price_change']:+.0f}$ "
+                f"({r['lo_price']:.0f}→{r['hi_price']:.0f}) · vol {r['total_vol']:.0f}BTC")
+        cvds = self.get_cvd_windows()
+        parts = [f"{m}m:{cvds[m]['cvd']:+.0f}" for m in (1, 5, 15, 30)
+                 if cvds.get(m, {}).get("ready")]
+        if parts:
+            accel = cvds.get(15, {})
+            acc_txt = ""
+            if accel.get("ready"):
+                a = accel.get("acceleration", 0)
+                acc_txt = f" (CVD15m {'accélère' if a > 1.2 else 'ralentit' if a < 0.8 else 'stable'})"
+            lines.append("  CVD par fenêtre: " + " ".join(parts) + acc_txt)
+        return "\n".join(lines) if len(lines) > 1 else ""
+
     def get_levels_flow(self, prices, tol=30.0, window_s=3600):
         """Pour chaque prix donné : volume ACHETÉ vs VENDU exécuté autour (±tol$)
         sur la fenêtre. Montre si le niveau a été accumulé (achat) ou distribué

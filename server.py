@@ -66,8 +66,8 @@ class AlertServer:
         self.copilot = AICopilot(daily_budget_usd=2.20)   # charge claude_key.txt seul
         # OPUS 4.8 en permanence (verrouillé) : on veut la meilleure analyse possible
         self.copilot.model_label = MODEL_MAP["opus"]
-        # chaîne temporelle des métriques clés (pour analyser l'ÉVOLUTION, pas l'instant)
-        self._hist = deque(maxlen=300)      # échantillon ~toutes les 15s -> ~75 min
+        # chaîne temporelle des métriques clés (pour analyser l'ÉVOLUTION sur 2-3h)
+        self._hist = deque(maxlen=700)      # échantillon ~toutes les 20s -> ~3h50
         self._last_hist = 0.0
         self.tg = None
         self._start_telegram()
@@ -394,7 +394,7 @@ class AlertServer:
     def _sample_history(self):
         """Enregistre un point de la chaîne temporelle toutes les ~15s."""
         now = time.time()
-        if now - self._last_hist < 15:
+        if now - self._last_hist < 20:
             return
         s = self.state or {}
         mid = s.get("mid")
@@ -422,10 +422,10 @@ class AlertServer:
             return min(self._hist, key=lambda h: abs(h["t"] - target))
 
         oldest_min = (now - self._hist[0]["t"]) / 60
-        L = [f"\nÉVOLUTION sur ~{oldest_min:.0f} min (pour analyser la DYNAMIQUE, "
+        L = [f"\nÉVOLUTION sur ~{oldest_min:.0f} min (trajectoire fine — pour la DYNAMIQUE, "
              "pas l'instant figé) :"]
-        for mins in (30, 20, 15, 10, 5, 2, 0):
-            if mins / 60 > 0 and mins > oldest_min + 1:
+        for mins in (180, 150, 120, 90, 60, 45, 30, 20, 15, 10, 5, 2, 0):
+            if mins > 0 and mins > oldest_min + 1:
                 continue
             h = self._hist[-1] if mins == 0 else at(mins)
             lbl = "maintenant" if mins == 0 else f"-{mins}min"
@@ -496,14 +496,10 @@ class AlertServer:
                          f"(~{bp['usd']/1e6:.2f}M$)")
         elif seg5 is not None:
             L.append("Gros ordres (>5 BTC) : aucun sur 5min (rien côté gros pour l'instant).")
-        # BILANS par fenêtre (volume, direction, variation de prix)
-        L.append("BILANS par fenêtre :")
-        for m in (15, 30, 60):
-            wr = self.engine.window_report(m)
-            if wr.get("ready"):
-                L.append(f"  {m}min: {wr['dominant']} {wr['buy_share']*100:.0f}%achat · "
-                         f"vol {wr['total_vol']:.0f}BTC · prix {wr['price_change']:+.0f}$ "
-                         f"({wr['lo_price']:.0f}→{wr['hi_price']:.0f})")
+        # ANALYSE MULTI-TIMEFRAME (5min → 3h) : évolution réelle à chaque horizon
+        mtf = self.engine.multi_tf_text()
+        if mtf:
+            L.append(mtf)
         # VOLUME PROFILE multi-fenêtres
         for win_s, lbl in ((3600, "1h"), (14400, "4h")):
             vp = self.engine.get_volume_profile(win_s)

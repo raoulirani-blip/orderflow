@@ -2720,6 +2720,9 @@ class Cockpit(QtWidgets.QMainWindow):
         hot = [it["title"] for it in items if it.get("hot")][:3]
         for t in hot:
             L.append(f"news importante: {t}")
+        mtf = self.engine.multi_tf_text()          # analyse multi-timeframe 5min→3h
+        if mtf:
+            L.append(mtf)
         L.append("(fenêtre US 13h-16h = plus de mouvement)")
         return "\n".join(L)
 
