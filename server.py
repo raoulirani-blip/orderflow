@@ -321,6 +321,9 @@ class AlertServer:
                 b, sv = lf.get(p, (0, 0))
                 car = "accumulé" if b >= sv else "distribué"
                 L.append(f"{p:,.0f} (à {abs(p-mid):.0f}$) : {car} — achat {b:.0f} / vente {sv:.0f}")
+        evo = self._evolution_text()          # mini-graphs d'évolution
+        if evo:
+            L.append(evo)
         return "\n".join(L)
 
     def _cmd_proximite(self, q):
@@ -400,43 +403,64 @@ class AlertServer:
         mid = s.get("mid")
         if not mid or s.get("warming"):
             return
-        c1 = self.engine.get_cvd_windows().get(1, {})
+        cvds = self.engine.get_cvd_windows()
+        c1 = cvds.get(1, {}); c15 = cvds.get(15, {})
+        seg = self.engine.get_flow_segments(300)
         self._hist.append({
             "t": now, "price": mid,
             "cvd1": c1.get("cvd", 0) if c1.get("ready") else 0,
+            "cvd15": c15.get("cvd", 0) if c15.get("ready") else 0,
             "agg": s.get("aggressor_ratio", 0.5),
             "imb": s.get("imbalance", 0.5),
             "tape": s.get("tape_speed", 0.0),
+            "inst": seg["inst"]["delta"] if seg else 0.0,   # flux INSTITUTIONNEL 5min
         })
         self._last_hist = now
 
-    def _evolution_text(self):
-        """Chaîne temporelle lisible : comment prix/CVD/agresseurs ont ÉVOLUÉ.
-        C'est ce qui permet à Opus d'analyser la dynamique, pas juste l'instant."""
-        if len(self._hist) < 3:
+    @staticmethod
+    def _spark(vals):
+        """Mini-graphe texte (sparkline) : ▁▂▃▄▅▆▇█ du plus ancien au plus récent."""
+        vals = [v for v in vals if v is not None]
+        if len(vals) < 2:
             return ""
-        now = time.time()
+        lo, hi = min(vals), max(vals)
+        chars = "▁▂▃▄▅▆▇█"
+        if hi == lo:
+            return chars[3] * len(vals)
+        return "".join(chars[int((v - lo) / (hi - lo) * 7)] for v in vals)
 
-        def at(mins):
-            target = now - mins * 60
-            return min(self._hist, key=lambda h: abs(h["t"] - target))
+    def _series(self, key, n=28):
+        """n points régulièrement espacés d'une métrique sur tout l'historique."""
+        h = list(self._hist)
+        if len(h) < 2:
+            return []
+        step = max(1, len(h) // n)
+        return [x.get(key) for x in h[::step]]
 
-        oldest_min = (now - self._hist[0]["t"]) / 60
-        L = [f"\nÉVOLUTION sur ~{oldest_min:.0f} min (trajectoire fine — pour la DYNAMIQUE, "
-             "pas l'instant figé) :"]
-        for mins in (180, 150, 120, 90, 60, 45, 30, 20, 15, 10, 5, 2, 0):
-            if mins > 0 and mins > oldest_min + 1:
-                continue
-            h = self._hist[-1] if mins == 0 else at(mins)
-            lbl = "maintenant" if mins == 0 else f"-{mins}min"
-            L.append(f"  {lbl}: prix {h['price']:,.0f} · CVD1m {h['cvd1']:+.0f} · "
-                     f"agress {h['agg']*100:.0f}% · carnet {h['imb']*100:.0f}%ach · "
-                     f"tape {h['tape']:.0f}/s")
-        # vitesse récente du prix
-        p_now = self._hist[-1]["price"]; p_5 = at(5)["price"]
-        dp = p_now - p_5
-        L.append(f"  → sur 5 min le prix a {('MONTÉ' if dp>0 else 'BAISSÉ' if dp<0 else 'stagné')} "
-                 f"de {abs(dp):,.0f}$")
+    def _evolution_text(self):
+        """MINI-GRAPHS d'évolution (sparklines) : TOUTES les métriques montrées comme
+        des courbes dans le temps, pas des valeurs figées. Focus flux institutionnel."""
+        if len(self._hist) < 4:
+            return ""
+        span = (time.time() - self._hist[0]["t"]) / 60
+        L = [f"\nGRAPHS D'ÉVOLUTION (~{span:.0f} min · gauche=ancien → droite=maintenant) :"]
+
+        def g(lbl, key, fmt):
+            ser = self._series(key)
+            ser = [v for v in ser if v is not None]
+            if len(ser) < 2:
+                return
+            a, b = ser[0], ser[-1]
+            trend = "↑" if b > a else ("↓" if b < a else "→")
+            L.append(f"  {lbl:9s}{self._spark(ser)}  {fmt.format(a)}→{fmt.format(b)} {trend}")
+
+        g("Prix", "price", "{:,.0f}")
+        g("Instit", "inst", "{:+.0f}")          # LE flux institutionnel dans le temps
+        g("CVD 1m", "cvd1", "{:+.0f}")
+        g("CVD 15m", "cvd15", "{:+.0f}")
+        g("Agress", "agg", "{:.0%}")
+        g("Carnet", "imb", "{:.0%}")
+        g("Tape/s", "tape", "{:.0f}")
         return "\n".join(L)
 
     def _snapshot_text(self):
@@ -449,8 +473,10 @@ class AlertServer:
              "par fenêtre, le volume profile 1h et 4h, les liquidations, les sweeps, le positionnement "
              "(OI, funding), et l'ÉVOLUTION dans le temps. Tu as accès à TOUT ça ici — ne dis JAMAIS "
              "que tu n'as pas accès à une donnée qui figure ci-dessous ; sers-t'en. "
-             "IMPORTANT : base ton analyse sur l'ÉVOLUTION/la dynamique (section en bas), pas seulement "
-             "sur l'instant (vitesse du prix, réaction aux murs, tendance CVD/agresseurs dans le temps)."]
+             "PRIORITÉ AU FLUX INSTITUTIONNEL : dis toujours ce que font les GROS (delta institutionnel "
+             "par fenêtre + fil des gros ordres) — ce sont eux qui comptent, pas le retail. "
+             "IMPORTANT : lis les GRAPHS D'ÉVOLUTION (sparklines ▁▂▃▄▅▆▇█) et l'analyse MULTI-TIMEFRAME "
+             "pour raisonner sur les TENDANCES et la dynamique, JAMAIS sur une valeur figée à l'instant."]
         mid = s.get("mid")
         if mid:
             L.append(f"prix={mid:.0f} spread={s.get('spread',0):.1f}$ "
