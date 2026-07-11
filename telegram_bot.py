@@ -50,6 +50,18 @@ class TelegramCopilotBot:
         except Exception:
             pass
 
+    def send_photo(self, png_bytes, caption=""):
+        """Envoie une IMAGE (graphique) sur Telegram — cliquable/zoomable."""
+        if not self.token or not self.chat_id or not png_bytes:
+            return
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendPhoto",
+                data={"chat_id": self.chat_id, "caption": caption[:1000]},
+                files={"photo": ("graph.png", png_bytes, "image/png")}, timeout=30)
+        except Exception:
+            pass
+
     def set_commands(self, commands):
         """Enregistre le menu des commandes : Telegram affiche la liste dès qu'on
         tape « / » dans la conversation."""

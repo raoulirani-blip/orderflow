@@ -77,6 +77,8 @@ class AlertServer:
         # AUTO-MISE À JOUR fiable : le serveur se surveille lui-même et se relance
         # tout seul quand du nouveau code arrive (pas de sudo/cron -> ne peut pas rater)
         threading.Thread(target=self._self_update_loop, daemon=True).start()
+        # s'assure que matplotlib est présent (pour la commande /graph), sans bloquer
+        threading.Thread(target=self._ensure_matplotlib, daemon=True).start()
 
     # ---------- config ----------
     def _load_cfg(self):
@@ -197,6 +199,7 @@ class AlertServer:
                 self._telegram_question, self._telegram_learn_chat)
             self.tg.start()
             self.tg.set_commands([
+                {"command": "graph", "description": "Graphique : prix + murs + CVD + flux institutionnel"},
                 {"command": "live", "description": "Toutes les données du marché en direct"},
                 {"command": "status", "description": "État du serveur + tes niveaux surveillés"},
                 {"command": "niveaux", "description": "Définir tes niveaux (ex: 61000, 63000)"},
@@ -221,6 +224,8 @@ class AlertServer:
             return self._cmd_niveaux(q)
         if low in ("/live", "/marche", "/data", "/direct"):
             return self._cmd_live()
+        if low in ("/graph", "/graphique", "/chart", "/courbe"):
+            return self._cmd_graph()
         if low.startswith("/model"):
             return self._cmd_modele(q)
         if low.startswith("/proxi") or low.startswith("/distance"):
@@ -340,6 +345,99 @@ class AlertServer:
         # verrouillé sur Opus 4.8 (le plus puissant) — on veut la meilleure analyse
         self.copilot.model_label = MODEL_MAP["opus"]
         return "🔒 Le copilote utilise Opus 4.8 (le modèle le plus puissant) en permanence."
+
+    def _ensure_matplotlib(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            import subprocess
+            import sys
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "matplotlib"],
+                               timeout=300, capture_output=True)
+                print("[graph] matplotlib installé")
+            except Exception:
+                pass
+
+    def _build_chart_png(self):
+        """Vrai graphique (PNG) : Prix + murs + VWAP · CVD 15m · Flux institutionnel."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import io
+        import matplotlib.pyplot as plt
+        import numpy as np
+        h = list(self._hist)
+        if len(h) < 5:
+            return None
+        now = time.time()
+        x = np.array([(p["t"] - now) / 60.0 for p in h])       # min (0 = maintenant)
+        price = [p["price"] for p in h]
+        cvd15 = np.array([p.get("cvd15", 0) for p in h], dtype=float)
+        inst = np.array([p.get("inst", 0) for p in h], dtype=float)
+        s = self.state or {}
+        mid = s.get("mid", price[-1])
+        span = (h[-1]["t"] - h[0]["t"]) / 60
+
+        fig, (a1, a2, a3) = plt.subplots(
+            3, 1, figsize=(8.5, 8.6), sharex=True, facecolor="#0d1117",
+            gridspec_kw={"height_ratios": [3, 2, 2], "hspace": 0.12})
+        for ax in (a1, a2, a3):
+            ax.set_facecolor("#0d1117"); ax.grid(alpha=0.12)
+            ax.tick_params(colors="#8a94a6", labelsize=8)
+            for sp in ax.spines.values():
+                sp.set_color("#33404f")
+
+        # PRIX + murs proches + VWAP + tes niveaux
+        a1.plot(x, price, color="#4da3ff", lw=1.8, zorder=3)
+        for w in sorted(s.get("walls", []), key=lambda w: abs(w["price"] - mid))[:6]:
+            c = "#3ddc84" if w["side"] == "bid" else "#ff5c5c"
+            a1.axhline(w["price"], color=c, lw=0.9, alpha=0.5)
+            a1.text(x[0], w["price"], f" {w['price']:,.0f} ({w['qty']:.0f}BTC)",
+                    color=c, fontsize=7, va="center")
+        vw = self.engine.get_vwap()
+        if vw:
+            a1.axhline(vw["vwap"], color="#f5c518", lw=1.0, ls="--", alpha=0.8)
+        for lv in self.cfg.get("levels", []):
+            a1.axhline(lv, color="#00e5ff", lw=1.1, ls=":", alpha=0.9)
+        a1.set_ylabel("Prix $", color="#aab4c0", fontsize=9)
+        a1.set_title(f"BTC {mid:,.0f}$   ·   {time.strftime('%H:%M')}   ·   {span:.0f} min",
+                     color="#e8eef5", fontsize=13, fontweight="bold")
+
+        # CVD 15m
+        a2.plot(x, cvd15, color="#f5c518", lw=1.4)
+        a2.fill_between(x, cvd15, 0, where=cvd15 >= 0, color="#3ddc84", alpha=0.25)
+        a2.fill_between(x, cvd15, 0, where=cvd15 < 0, color="#ff5c5c", alpha=0.25)
+        a2.axhline(0, color="#555", lw=0.6)
+        a2.set_ylabel("CVD 15m", color="#aab4c0", fontsize=9)
+
+        # FLUX INSTITUTIONNEL
+        a3.plot(x, inst, color="#c48bff", lw=1.4)
+        a3.fill_between(x, inst, 0, where=inst >= 0, color="#3ddc84", alpha=0.3)
+        a3.fill_between(x, inst, 0, where=inst < 0, color="#ff5c5c", alpha=0.3)
+        a3.axhline(0, color="#555", lw=0.6)
+        a3.set_ylabel("Flux instit Δ5m", color="#aab4c0", fontsize=9)
+        a3.set_xlabel("minutes (0 = maintenant)", color="#aab4c0", fontsize=9)
+
+        fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.07)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110, facecolor="#0d1117")
+        plt.close(fig)
+        return buf.getvalue()
+
+    def _cmd_graph(self):
+        try:
+            png = self._build_chart_png()
+        except ImportError:
+            return ("Le module graphique s'installe (1re fois, ~1 min) — "
+                    "réessaie /graph dans une minute.")
+        except Exception as e:
+            return f"⚠ Souci génération graphique : {type(e).__name__}"
+        if not png:
+            return "Pas encore assez de données pour un graphique — laisse tourner 1-2 min."
+        if self.tg:
+            self.tg.send_photo(png, "📈 Prix + murs + VWAP · CVD 15m · Flux institutionnel")
+            return ""
+        return "Graphique généré (bot non connecté)."
 
     def _cmd_update(self):
         import subprocess
