@@ -443,9 +443,14 @@ class AlertServer:
         """Instantané compact pour le copilote (identique en esprit à l'appli)."""
         s = self.state or {}
         L = ["Données live BTC perp (agrégé Binance+OKX+Bybit+Hyperliquid). "
-             "IMPORTANT : base ton analyse sur l'ÉVOLUTION/la dynamique (section en bas), "
-             "pas seulement sur l'instant. Regarde comment le prix réagit aux niveaux/murs "
-             "(vitesse, cassure ou rejet), la tendance du CVD et des agresseurs dans le temps."]
+             "Ce snapshot contient TOUTES les données du logiciel : prix/spread/imbalance, agresseurs, "
+             "tape, VWAP, CVD 1/5/15/30min, TOUS les murs (actifs/validés/cassés), le FIL des gros "
+             "ordres un par un (>5 BTC), le flux retail/moyen/institutionnel sur 5/30/60min, les bilans "
+             "par fenêtre, le volume profile 1h et 4h, les liquidations, les sweeps, le positionnement "
+             "(OI, funding), et l'ÉVOLUTION dans le temps. Tu as accès à TOUT ça ici — ne dis JAMAIS "
+             "que tu n'as pas accès à une donnée qui figure ci-dessous ; sers-t'en. "
+             "IMPORTANT : base ton analyse sur l'ÉVOLUTION/la dynamique (section en bas), pas seulement "
+             "sur l'instant (vitesse du prix, réaction aux murs, tendance CVD/agresseurs dans le temps)."]
         mid = s.get("mid")
         if mid:
             L.append(f"prix={mid:.0f} spread={s.get('spread',0):.1f}$ "
@@ -475,19 +480,54 @@ class AlertServer:
                 if inval:
                     L.append("Murs récemment CASSÉS/invalidés (contexte) : " +
                              ", ".join(f"{wl['price']:.0f}" for wl in inval))
-        seg = self.engine.get_flow_segments(300)
-        if seg:
-            L.append(f"delta5min retail={seg['retail']['delta']:+.1f} "
-                     f"moyen={seg['mid']['delta']:+.1f} instit={seg['inst']['delta']:+.1f} BTC")
-        vp = self.engine.get_volume_profile(3600)
-        if vp:
-            L.append(f"POC={vp['poc']:.0f} VAH={vp['vah']:.0f} VAL={vp['val']:.0f}")
+        # FLUX retail/moyen/instit sur plusieurs fenêtres (page INSTITUTIONNELS)
+        for win_s, lbl in ((300, "5min"), (1800, "30min"), (3600, "60min")):
+            seg = self.engine.get_flow_segments(win_s)
+            if seg:
+                L.append(f"delta{lbl} retail={seg['retail']['delta']:+.1f} "
+                         f"moyen={seg['mid']['delta']:+.1f} instit={seg['inst']['delta']:+.1f}BTC "
+                         f"(instit: achat {seg['inst']['buy']:.1f} / vente {seg['inst']['sell']:.1f})")
+        # FIL DES GROS ORDRES un par un (>5 BTC), le + récent d'abord (page INSTITUTIONNELS)
+        seg5 = self.engine.get_flow_segments(300)
+        if seg5 and seg5.get("big_prints"):
+            L.append("GROS ORDRES récents (heure · côté · prix · taille) :")
+            for bp in seg5["big_prints"][:15]:
+                L.append(f"  {bp['ts']} {bp['side']} @{bp['price']:.0f} {bp['qty']:.2f}BTC "
+                         f"(~{bp['usd']/1e6:.2f}M$)")
+        elif seg5 is not None:
+            L.append("Gros ordres (>5 BTC) : aucun sur 5min (rien côté gros pour l'instant).")
+        # BILANS par fenêtre (volume, direction, variation de prix)
+        L.append("BILANS par fenêtre :")
+        for m in (15, 30, 60):
+            wr = self.engine.window_report(m)
+            if wr.get("ready"):
+                L.append(f"  {m}min: {wr['dominant']} {wr['buy_share']*100:.0f}%achat · "
+                         f"vol {wr['total_vol']:.0f}BTC · prix {wr['price_change']:+.0f}$ "
+                         f"({wr['lo_price']:.0f}→{wr['hi_price']:.0f})")
+        # VOLUME PROFILE multi-fenêtres
+        for win_s, lbl in ((3600, "1h"), (14400, "4h")):
+            vp = self.engine.get_volume_profile(win_s)
+            if vp:
+                L.append(f"volume profile {lbl}: POC={vp['poc']:.0f} VAH={vp['vah']:.0f} VAL={vp['val']:.0f}")
+        # sweeps en cascade récents
+        casc = self.engine.get_cascade_sweeps(180)
+        if casc:
+            c0 = casc[0]
+            L.append(f"dernier SWEEP cascade: {c0['side']} {c0['qty']:.1f}BTC sur {c0['levels']} "
+                     f"niveaux ({c0['lo']:.0f}-{c0['hi']:.0f}) à {c0['ts']}")
         pos = self.engine.get_positioning()
         f = pos.get("funding"); oi = pos.get("oi")
         if f:
-            L.append(f"funding={f['rate_pct']:+.4f}%")
+            L.append(f"funding={f['rate_pct']:+.4f}% (annualisé {f.get('annual_pct',0):+.1f}%)")
         if oi:
-            L.append(f"OI={oi['now']:.0f}BTC 5min={oi['chg_5m_pct']:+.2f}%")
+            L.append(f"OI={oi['now']:.0f}BTC 5min={oi['chg_5m_pct']:+.2f}% 15min={oi['chg_15m_pct']:+.2f}%")
+        # liquidations (page POSITIONNEMENT)
+        lq = pos.get("liq_5m", {})
+        if lq.get("long_usd", 0) + lq.get("short_usd", 0) > 0:
+            L.append(f"liquidations 5min: longs {lq['long_usd']/1e6:.2f}M$ / "
+                     f"shorts {lq['short_usd']/1e6:.2f}M$ ({lq.get('n',0)} events)")
+        for liq in pos.get("liqs", [])[:4]:
+            L.append(f"  liq {liq['side']} @{liq['price']:.0f} {liq['qty']:.3f}BTC à {liq['ts']}")
         ab = s.get("absorption")
         if ab:
             L.append(f"ABSORPTION ({ab[0]}): {ab[1][:90]}")
