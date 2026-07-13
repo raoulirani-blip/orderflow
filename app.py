@@ -2408,6 +2408,13 @@ class Cockpit(QtWidgets.QMainWindow):
         intro.setWordWrap(True); intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
 
+        # ---- BANDEAU ANOMALIES (z-scores) ----
+        self.q_anomaly = QtWidgets.QLabel("Extrêmes statistiques : accumulation des données…")
+        self.q_anomaly.setWordWrap(True)
+        self.q_anomaly.setStyleSheet(f"color:{DIM};font-size:14px;font-weight:800;"
+                                     f"background:{PANEL2};border:2px solid {BORDER};border-radius:10px;padding:12px;")
+        outer.addWidget(self.q_anomaly)
+
         # ---- OPTIONS ----
         outer.addWidget(self._h("OPTIONS BTC  ·  Deribit  (volatilité implicite · skew · max pain)"))
         orow = QtWidgets.QHBoxLayout(); orow.setSpacing(10)
@@ -2457,7 +2464,58 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.addStretch(1)
         return page
 
+    def _z_sample_and_score(self):
+        """Échantillonne les métriques intraday (~25s) et renvoie leurs z-scores :
+        z = (valeur actuelle − moyenne) / écart-type → |z|>2 = statistiquement anormal."""
+        import time as _t
+        import statistics
+        from collections import deque
+        if not hasattr(self, "_zbuf"):
+            self._zbuf = deque(maxlen=160); self._z_last = 0.0
+        now = _t.time()
+        s = self._last_state or {}
+        if now - self._z_last > 25 and s.get("mid") and not s.get("warming"):
+            cvds = self.engine.get_cvd_windows(); c5 = cvds.get(5, {})
+            pos = self.engine.get_positioning(); oi = pos.get("oi") or {}
+            self._zbuf.append({
+                "CVD 5min": c5.get("cvd", 0) if c5.get("ready") else 0,
+                "Agresseurs": s.get("aggressor_ratio", 0.5),
+                "Cadence (tape)": s.get("tape_speed", 0.0),
+                "OI 5min %": oi.get("chg_5m_pct", 0.0),
+            })
+            self._z_last = now
+        out = {}
+        if len(self._zbuf) >= 12:
+            for k in self._zbuf[-1]:
+                vals = [x[k] for x in self._zbuf]
+                m = statistics.mean(vals); sd = statistics.pstdev(vals)
+                out[k] = (vals[-1] - m) / sd if sd > 1e-9 else 0.0
+        return out
+
     def _refresh_quant(self):
+        # --- anomalies statistiques (z-scores) ---
+        z = self._z_sample_and_score()
+        if not z:
+            self.q_anomaly.setText("📊 Extrêmes statistiques : accumulation des données "
+                                   "(prêt dans ~5 min de fonctionnement)…")
+            self.q_anomaly.setStyleSheet(f"color:{DIM};font-size:13px;font-weight:700;"
+                                         f"background:{PANEL2};border:2px solid {BORDER};border-radius:10px;padding:12px;")
+        else:
+            hot = [(k, v) for k, v in z.items() if abs(v) >= 2.0]
+            if hot:
+                hot.sort(key=lambda kv: abs(kv[1]), reverse=True)
+                txt = " · ".join(f"{k} z={v:+.1f} ({'très fort' if abs(v)>=3 else 'anormal'})"
+                                 for k, v in hot)
+                self.q_anomaly.setText(f"⚠️ ANOMALIE : {txt} — mouvement inhabituel, "
+                                       f"souvent un point de bascule intraday.")
+                self.q_anomaly.setStyleSheet(f"color:{AMBER};font-size:14px;font-weight:800;"
+                                             f"background:{PANEL2};border:2px solid {AMBER};border-radius:10px;padding:12px;")
+            else:
+                summary = " · ".join(f"{k} z={v:+.1f}" for k, v in z.items())
+                self.q_anomaly.setText(f"🟢 Rien d'anormal statistiquement.  ({summary})")
+                self.q_anomaly.setStyleSheet(f"color:{GREEN};font-size:13px;font-weight:700;"
+                                             f"background:{PANEL2};border:2px solid {BORDER};border-radius:10px;padding:12px;")
+
         o = getattr(self, "quant", None) and self.quant.options
         if o:
             iv = o["atm_iv"]
