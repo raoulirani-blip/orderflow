@@ -163,6 +163,13 @@ class Cockpit(QtWidgets.QMainWindow):
         # ici, pour qu'il soit IMPOSSIBLE d'avoir des doublons ou un conflit Telegram,
         # même si l'appli PC est ouverte en même temps que le serveur.
 
+        # flux QUANT (options Deribit + macro) — threads de fond, cache lu par l'UI
+        from quant import QuantFeed
+        self.quant = QuantFeed()
+        self._quant_timer = QtCore.QTimer(self)
+        self._quant_timer.timeout.connect(self._refresh_quant)
+        self._quant_timer.start(2000)          # lit le cache toutes les 2s (instantané)
+
         # flux news (thread de fond, rafraîchi toutes les 5 min)
         from news import NewsFeed
         self.newsfeed = NewsFeed(refresh_s=300)
@@ -211,6 +218,9 @@ class Cockpit(QtWidgets.QMainWindow):
 
         # --- Page 7: OI + Funding + Liquidations ---
         self.tabs.addTab(self._build_pos_page(), "  🧭  POSITIONNEMENT  ")
+
+        # --- Quant : options Deribit + macro ---
+        self.tabs.addTab(self._build_quant_page(), "  📐  QUANT  ")
 
         # --- Calculateur de position (money management) ---
         self.tabs.addTab(self._build_calc_page(), "  🧮  CALCULATEUR  ")
@@ -2368,6 +2378,128 @@ class Cockpit(QtWidgets.QMainWindow):
         return page
 
     # ===========================================================
+    # PAGE QUANT — OPTIONS DERIBIT + CONTEXTE MACRO
+    # ===========================================================
+
+    def _quant_card(self, title, col):
+        box = QtWidgets.QFrame()
+        box.setStyleSheet(f"QFrame{{background:{PANEL};border:1px solid {BORDER};border-radius:12px;}}")
+        bl = QtWidgets.QVBoxLayout(box); bl.setContentsMargins(14, 10, 14, 10); bl.setSpacing(2)
+        cap = QtWidgets.QLabel(title)
+        cap.setStyleSheet(f"color:{col};font-size:10px;font-weight:800;letter-spacing:1px;border:none;")
+        val = QtWidgets.QLabel("—")
+        val.setStyleSheet(f"color:{TXT};font-size:22px;font-weight:800;border:none;")
+        sub = QtWidgets.QLabel(""); sub.setWordWrap(True)
+        sub.setStyleSheet(f"color:{DIM};font-size:11px;border:none;")
+        bl.addWidget(cap); bl.addWidget(val); bl.addWidget(sub)
+        box._val = val; box._sub = sub
+        return box
+
+    def _build_quant_page(self):
+        from quant import MACRO_SYMBOLS
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(14)
+
+        intro = QtWidgets.QLabel(
+            "Quant : le contexte au-delà de l'order flow. OPTIONS (Deribit) = comment le marché "
+            "price le risque et vers quel prix l'expiration attire. MACRO = le vent de fond "
+            "(actions, dollar, peur) qui pousse ou freine BTC.")
+        intro.setWordWrap(True); intro.setStyleSheet(f"color:{DIM};font-size:12px;")
+        outer.addWidget(intro)
+
+        # ---- OPTIONS ----
+        outer.addWidget(self._h("OPTIONS BTC  ·  Deribit  (volatilité implicite · skew · max pain)"))
+        orow = QtWidgets.QHBoxLayout(); orow.setSpacing(10)
+        self.q_iv = self._quant_card("VOLATILITÉ IMPLICITE (ATM)", ACCENT)
+        self.q_skew = self._quant_card("SKEW  PUT / CALL", AMBER)
+        self.q_pain = self._quant_card("MAX PAIN  (aimant d'expi)", VIOLET)
+        self.q_pcr = self._quant_card("PUT/CALL  ·  OPEN INTEREST", GREEN)
+        for c in (self.q_iv, self.q_skew, self.q_pain, self.q_pcr):
+            orow.addWidget(c, 1)
+        outer.addLayout(orow)
+        self.q_opt_read = QtWidgets.QLabel("Chargement des options Deribit…")
+        self.q_opt_read.setWordWrap(True)
+        self.q_opt_read.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:600;"
+                                      f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:11px;")
+        outer.addWidget(self.q_opt_read)
+
+        # ---- MACRO ----
+        outer.addWidget(self._h("CONTEXTE MACRO  ·  risk-on / risk-off  (ce qui pousse ou freine BTC)"))
+        mgrid = QtWidgets.QGridLayout(); mgrid.setSpacing(10)
+        self.q_macro_cards = {}
+        for i, (name, _sym) in enumerate(MACRO_SYMBOLS):
+            c = self._quant_card(name.upper(), ACCENT)
+            self.q_macro_cards[name] = c
+            mgrid.addWidget(c, i // 3, i % 3)
+        outer.addLayout(mgrid)
+        self.q_macro_read = QtWidgets.QLabel("Chargement macro…")
+        self.q_macro_read.setWordWrap(True)
+        self.q_macro_read.setStyleSheet(f"color:{TXT};font-size:14px;font-weight:700;"
+                                        f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:12px;")
+        outer.addWidget(self.q_macro_read)
+        outer.addStretch(1)
+        return page
+
+    def _refresh_quant(self):
+        o = getattr(self, "quant", None) and self.quant.options
+        if o:
+            iv = o["atm_iv"]
+            self.q_iv._val.setText(f"{iv:.1f}%")
+            self.q_iv._sub.setText("calme" if iv < 35 else "normale" if iv < 55
+                                   else "ÉLEVÉE — gros mouvements attendus")
+            sk = o["skew"]
+            if sk is not None:
+                self.q_skew._val.setText(f"{sk:+.1f}")
+                self.q_skew._val.setStyleSheet(
+                    f"color:{RED if sk > 2 else GREEN if sk < -2 else TXT};"
+                    f"font-size:22px;font-weight:800;border:none;")
+                self.q_skew._sub.setText(
+                    "puts plus chers = couverture baissière / peur" if sk > 2 else
+                    "calls plus chers = appétit haussier" if sk < -2 else "équilibré")
+            mp = o["max_pain"]; under = o["under"]
+            self.q_pain._val.setText(f"{mp:,.0f}")
+            d = mp - under
+            self.q_pain._sub.setText(f"expi {o['front']} · {d:+,.0f}$ du prix "
+                                     f"({'aimant au-dessus' if d > 0 else 'aimant en-dessous'})")
+            pcr = o["pcr"]
+            self.q_pcr._val.setText(f"{pcr:.2f}" if pcr else "—")
+            self.q_pcr._sub.setText(f"OI total {o['total_oi']:,.0f} BTC "
+                                    f"(~{o['total_oi']*under/1e9:.1f} Md$)")
+            reads = [f"IV {iv:.0f}%"]
+            if sk is not None:
+                reads.append("skew côté PUTS (peur/couverture)" if sk > 2 else
+                             "skew côté CALLS (appétit haussier)" if sk < -2 else "skew neutre")
+            reads.append(f"le marché options « aime » {mp:,.0f} pour l'expi {o['front']} (aimant possible)")
+            self.q_opt_read.setText("Lecture : " + "  ·  ".join(reads))
+
+        m = getattr(self, "quant", None) and self.quant.macro
+        if m:
+            for name, c in self.q_macro_cards.items():
+                v = m.get(name)
+                if v and v.get("price") is not None:
+                    c._val.setText(f"{v['price']:,.2f}")
+                    chg = v.get("chg")
+                    col = GREEN if (chg or 0) >= 0 else RED
+                    c._sub.setText(f"{chg:+.2f}% aujourd'hui" if chg is not None else "—")
+                    c._sub.setStyleSheet(f"color:{col};font-size:12px;font-weight:700;border:none;")
+
+            def chg(n):
+                v = m.get(n)
+                return v["chg"] if (v and v.get("chg") is not None) else 0.0
+            score = ((1 if chg("Nasdaq") > 0 else -1) + (1 if chg("S&P 500") > 0 else -1)
+                     + (1 if chg("Dollar (DXY)") < 0 else -1) + (1 if chg("VIX (peur)") < 0 else -1))
+            if score >= 2:
+                self.q_macro_read.setText("🟢 RISK-ON : actions en hausse, dollar/peur en baisse "
+                                          "→ vent porteur pour BTC.")
+            elif score <= -2:
+                self.q_macro_read.setText("🔴 RISK-OFF : actions en baisse, dollar/peur en hausse "
+                                          "→ vent contraire pour BTC.")
+            else:
+                self.q_macro_read.setText("🟡 Macro mitigée : pas de vent de fond marqué pour BTC "
+                                          "(BTC trade surtout sur son propre flux).")
+
+    # ===========================================================
     # PAGE 8 — NEWS CRYPTO + GUIDE MACRO
     # ===========================================================
 
@@ -3104,6 +3236,10 @@ class Cockpit(QtWidgets.QMainWindow):
 
     def closeEvent(self,e):
         self.newsfeed.stop()
+        try:
+            self.quant.stop()
+        except Exception:
+            pass
         try:
             self.notifier.stop()
         except Exception:
