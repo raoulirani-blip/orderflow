@@ -515,6 +515,9 @@ class Cockpit(QtWidgets.QMainWindow):
         self.hm=pg.PlotWidget(); self.hm.setLabel("left","Prix"); self.hm.setLabel("bottom","Temps →")
         self.hm.showGrid(x=False,y=True,alpha=0.12)
         self.hm_img=pg.ImageItem(); self.hm.addItem(self.hm_img)
+        # bulles de TRADES exécutés (bookmap) : achat vert / vente rouge, taille ∝ volume
+        self.hm_trades=pg.ScatterPlotItem(pen=None)
+        self.hm_trades.setZValue(15); self.hm.addItem(self.hm_trades)
         self.mid_line=pg.InfiniteLine(angle=0,pen=pg.mkPen(ACCENT,width=1,style=QtCore.Qt.PenStyle.DashLine))
         self.hm.addItem(self.mid_line)
         # lignes VWAP (orange) et POC (violet) mises à jour par les timers lents
@@ -699,6 +702,12 @@ class Cockpit(QtWidgets.QMainWindow):
                 self.walls.setItem(i,j,it)
 
     def _heat(self,s):
+        import time as _t
+        # throttle : la bookmap ne se redessine que ~3x/s (les colonnes ne changent
+        # que toutes les 0.4s de toute façon) -> gros gain de fluidité, zéro latence
+        if _t.time() - getattr(self, "_heat_last", 0) < 0.33:
+            return
+        self._heat_last = _t.time()
         hm=s["heatmap"]
         if not hm: return
         rows=len(hm[0]); arr=np.zeros((len(hm),rows))
@@ -710,6 +719,20 @@ class Cockpit(QtWidgets.QMainWindow):
         self.hm_img.setRect(QtCore.QRectF(0,lo,len(hm),hi-lo))
         self.mid_line.setValue(s["mid"])
         self.hm.setYRange(lo,hi,padding=0); self.hm.setXRange(0,len(hm),padding=0)
+
+        # --- BULLES DE TRADES (bookmap) : x=colonne temps, y=prix, taille∝volume ---
+        ts = s.get("hm_ts") or []; trades = s.get("hm_trades") or []
+        if ts and trades:
+            tsa = np.asarray(ts); n = len(ts)
+            spots = []
+            for tt, pp, qq, ss in trades:
+                xi = min(max(int(np.searchsorted(tsa, tt)), 0), n - 1)
+                size = 3.0 + min(20.0, (qq ** 0.5) * 4.5)
+                brush = (255, 80, 80, 210) if ss else (60, 220, 130, 210)
+                spots.append({"pos": (xi + 0.5, pp), "size": size, "brush": brush, "pen": None})
+            self.hm_trades.setData(spots)
+        else:
+            self.hm_trades.setData([])
 
         # --- LABELS des niveaux les plus chargés en ordres (là où il y a le plus
         #     de liquidité, moyennée sur la période récente) ---

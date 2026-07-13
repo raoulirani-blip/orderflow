@@ -118,6 +118,8 @@ class OrderFlowEngine:
         self.heatmap_rows = heatmap_rows
         self.heatmap_cols = heatmap_cols
         self.heatmap = deque(maxlen=heatmap_cols)
+        self.heatmap_ts = deque(maxlen=heatmap_cols)   # timestamp de chaque colonne (bookmap)
+        self._hm_last_col = 0.0                          # throttle d'ajout de colonne
         self._hm_lo = None
         self._hm_hi = None
         self.hm_zoom = 1.0   # 1.0 = ±2% ; 0.5 = ±1% (zoomé) ; 2.0 = ±4% (dézoomé)
@@ -366,8 +368,13 @@ class OrderFlowEngine:
             self._hm_lo = mid - span; self._hm_hi = mid + span
             # FIX : les colonnes déjà dessinées utilisaient l'ancienne échelle ->
             # on efface pour ne pas afficher la liquidité aux mauvais prix
-            self.heatmap.clear()
+            self.heatmap.clear(); self.heatmap_ts.clear()
             lo, hi = self._hm_lo, self._hm_hi
+        # throttle : 1 colonne toutes les ~0.4s -> ~1.5 min de fenêtre (bookmap lisible)
+        now = time.time()
+        if self.heatmap and now - self._hm_last_col < 0.4:
+            return
+        self._hm_last_col = now
         rows = self.heatmap_rows
         col = [0.0] * rows
         step = (hi - lo) / rows
@@ -380,6 +387,16 @@ class OrderFlowEngine:
                     if 0 <= idx < rows:
                         col[idx] += d["qty"]
         self.heatmap.append(col)
+        self.heatmap_ts.append(now)
+
+    def _heatmap_trades(self):
+        """Trades exécutés dans la fenêtre de la bookmap (pour les superposer)."""
+        if not self.heatmap_ts:
+            return []
+        t0 = self.heatmap_ts[0]
+        with self.agg._lock:
+            return [(ts, p, q, s) for ts, v, p, q, s in self.agg.trades
+                    if ts >= t0 and q >= 0.08]        # filtre le bruit des micro-trades
 
     def _log(self, kind, text):
         self.events.appendleft({"ts": time.strftime("%H:%M:%S"), "kind": kind, "text": text})
@@ -575,6 +592,7 @@ class OrderFlowEngine:
             "sweeps": [dict(x) for x in list(self.sweeps)[:12]], "events": list(self.events)[:24],
             "bids_ladder": bids_ladder, "asks_ladder": asks_ladder,
             "heatmap": list(self.heatmap), "hm_lo": self._hm_lo, "hm_hi": self._hm_hi,
+            "hm_ts": list(self.heatmap_ts), "hm_trades": self._heatmap_trades(),
             "trend": self._trend(),
             "sess_hi": self._sess_hi, "sess_lo": self._sess_lo,
             "synced": all(self.agg.status.get(v) == "ok" for v in self.venues),
