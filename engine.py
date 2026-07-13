@@ -115,6 +115,13 @@ class OrderFlowEngine:
             self._log("MURS", f"Historique des murs rechargé : {n} niveaux repris.")
         self._last_wall_save = time.time()
 
+        # FOOTPRINT : backfill des trades d'AVANT le lancement (Binance aggTrades)
+        # pour que le footprint ne reparte plus de zéro à chaque relance.
+        self._launch_ts = time.time()
+        self._fp_bf = []            # trades pré-lancement (ts, price, qty, is_sell)
+        self._fp_bf_done = False
+        self._fp_bf_applied = set()
+
         self.heatmap_rows = heatmap_rows
         self.heatmap_cols = heatmap_cols
         self.heatmap = deque(maxlen=heatmap_cols)
@@ -130,6 +137,48 @@ class OrderFlowEngine:
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+        # backfill footprint en fond (trades réels d'avant le lancement)
+        threading.Thread(target=self._fp_backfill_run, daemon=True).start()
+
+    def _fp_backfill_run(self):
+        """Récupère ~20 min de trades RÉELS (Binance aggTrades) d'avant le lancement,
+        en respectant les limites d'API (pause entre appels). Une fois fini, le
+        footprint est reconstruit avec ce passé -> plus de reset à chaque relance."""
+        import requests
+        url = "https://fapi.binance.com/fapi/v1/aggTrades"
+        end_ms = int(self._launch_ts * 1000)
+        start_ms = end_ms - 22 * 60 * 1000
+        out, from_id = [], None
+        for _ in range(90):                     # garde-fou
+            try:
+                params = {"symbol": self.symbol.upper(), "limit": 1000}
+                if from_id is None:
+                    params["startTime"] = start_ms
+                    params["endTime"] = end_ms
+                else:
+                    params["fromId"] = from_id
+                r = requests.get(url, params=params, timeout=10).json()
+            except Exception:
+                break
+            if not isinstance(r, list) or not r:
+                break
+            done = False
+            for a in r:
+                t = a["T"] / 1000.0
+                if t > self._launch_ts:
+                    done = True
+                    break
+                # m=True -> l'acheteur est maker -> agresseur VENDEUR
+                out.append((t, float(a["p"]), float(a["q"]), bool(a["m"])))
+            if done or r[-1]["T"] >= end_ms or len(r) < 1000:
+                break
+            from_id = r[-1]["a"] + 1
+            time.sleep(1.1)                     # respecte le rate-limit Binance
+        self._fp_bf = out
+        self._fp_bf_done = True
+        if out:
+            self._log("FOOTPRINT", f"Historique footprint pré-chargé : "
+                      f"{len(out):,} trades (~{(out[-1][0]-out[0][0])/60:.0f} min).")
 
     def stop(self):
         self._running = False
@@ -1061,11 +1110,40 @@ class OrderFlowEngine:
         OHLC, delta et totaux. Cache incrémental : on ne traite que les NOUVEAUX
         trades depuis le dernier appel -> coût quasi nul, aucune latence UI."""
         key = (tf_s, bucket)
+
+        def acc(bars, ts, price, qty, is_sell):
+            b0 = int(ts // tf_s) * tf_s
+            bar = bars.get(b0)
+            if bar is None:
+                bar = bars[b0] = {"t0": b0, "o": price, "h": price, "l": price,
+                                  "c": price, "cells": {}, "buy": 0.0, "sell": 0.0}
+            lvl = round(price / bucket) * bucket
+            cell = bar["cells"].setdefault(lvl, [0.0, 0.0])
+            if is_sell:
+                cell[1] += qty; bar["sell"] += qty
+            else:
+                cell[0] += qty; bar["buy"] += qty
+            if price > bar["h"]: bar["h"] = price
+            if price < bar["l"]: bar["l"] = price
+            bar["c"] = price
+
         if getattr(self, "_fp_key", None) != key:
             self._fp_key = key
             self._fp_bars = {}
+            self._fp_bf_applied.discard(key)
             # au 1er appel on ne remonte que la fenêtre affichée (pas 1h de trades)
             self._fp_last_ts = time.time() - (n_bars + 2) * tf_s
+
+        # le backfill pré-lancement est prêt -> reconstruit tout avec le passé réel
+        if self._fp_bf_done and key not in self._fp_bf_applied:
+            self._fp_bf_applied.add(key)
+            self._fp_bars = {}
+            wstart = time.time() - (n_bars + 2) * tf_s
+            for ts, price, qty, is_sell in self._fp_bf:
+                if ts >= wstart:
+                    acc(self._fp_bars, ts, price, qty, is_sell)
+            self._fp_last_ts = self._launch_ts   # le live reprend après le lancement
+
         with self.agg._lock:
             new = []
             for t in reversed(self.agg.trades_hist):
@@ -1074,20 +1152,7 @@ class OrderFlowEngine:
                 new.append(t)
         new.reverse()
         for ts, price, qty, is_sell in new:
-            b0 = int(ts // tf_s) * tf_s
-            bar = self._fp_bars.get(b0)
-            if bar is None:
-                bar = self._fp_bars[b0] = {"t0": b0, "o": price, "h": price, "l": price,
-                                           "c": price, "cells": {}, "buy": 0.0, "sell": 0.0}
-            lvl = round(price / bucket) * bucket
-            cell = bar["cells"].setdefault(lvl, [0.0, 0.0])   # [achat, vente]
-            if is_sell:
-                cell[1] += qty; bar["sell"] += qty
-            else:
-                cell[0] += qty; bar["buy"] += qty
-            if price > bar["h"]: bar["h"] = price
-            if price < bar["l"]: bar["l"] = price
-            bar["c"] = price
+            acc(self._fp_bars, ts, price, qty, is_sell)
         if new:
             self._fp_last_ts = new[-1][0]
         # purge des bougies trop vieilles

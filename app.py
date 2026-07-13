@@ -228,6 +228,12 @@ class Cockpit(QtWidgets.QMainWindow):
         # --- Z-scores multi-échelles ---
         self.tabs.addTab(self._build_zscore_page(), "  📉  Z-SCORES  ")
 
+        # --- Options Deribit détaillées (graphiques) ---
+        self.tabs.addTab(self._build_options_page(), "  🎰  OPTIONS  ")
+
+        # --- Macro intraday (graphiques) ---
+        self.tabs.addTab(self._build_macro_page(), "  🌍  MACRO  ")
+
         # --- Calculateur de position (money management) ---
         self.tabs.addTab(self._build_calc_page(), "  🧮  CALCULATEUR  ")
 
@@ -2632,6 +2638,191 @@ class Cockpit(QtWidgets.QMainWindow):
                 self.q_liq_table.setItem(i, j, it)
 
     # ===========================================================
+    # PAGE OPTIONS — GRAPHIQUES DÉTAILLÉS (Deribit)
+    # ===========================================================
+
+    def _mk_qplot(self, glw, row, col, title):
+        plt = glw.addPlot(row=row, col=col)
+        plt.showGrid(x=True, y=True, alpha=0.08)
+        plt.setTitle(title, color="#aab4c0", size="10pt")
+        plt.getAxis("left").setTextPen(pg.mkPen("#66707e"))
+        plt.getAxis("bottom").setTextPen(pg.mkPen("#66707e"))
+        return plt
+
+    def _build_options_page(self):
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
+
+        intro = QtWidgets.QLabel(
+            "OPTIONS BTC (Deribit) en graphiques. SMILE : l'IV par strike — le côté le plus "
+            "haut dit où est la peur. OI PAR STRIKE : où sont les paris (calls verts / puts "
+            "rouges) — les gros strikes agissent comme des aimants/murs. MAX PAIN : la courbe "
+            "de douleur — son minimum est le prix qui ruine le plus d'acheteurs d'options "
+            "(aimant d'expiration). TERM STRUCTURE : l'IV par échéance — inversée = stress court terme.")
+        intro.setWordWrap(True); intro.setStyleSheet(f"color:{DIM};font-size:12px;")
+        outer.addWidget(intro)
+
+        self.opt_read = QtWidgets.QLabel("Chargement Deribit…")
+        self.opt_read.setWordWrap(True)
+        self.opt_read.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:700;"
+                                    f"background:{PANEL2};border:1px solid {BORDER};"
+                                    f"border-radius:10px;padding:11px;")
+        outer.addWidget(self.opt_read)
+
+        glw = pg.GraphicsLayoutWidget(); glw.setBackground("#0d1117")
+        self.opt_smile = self._mk_qplot(glw, 0, 0, "SMILE — IV % par strike (calls bleu · puts rouge)")
+        self.opt_smile_c = self.opt_smile.plot([], [], pen=pg.mkPen("#4da3ff", width=2),
+                                               symbol="o", symbolSize=4, symbolBrush="#4da3ff", symbolPen=None)
+        self.opt_smile_p = self.opt_smile.plot([], [], pen=pg.mkPen("#ff5c5c", width=2),
+                                               symbol="o", symbolSize=4, symbolBrush="#ff5c5c", symbolPen=None)
+        self.opt_smile_spot = pg.InfiniteLine(angle=90, pen=pg.mkPen("#f5c518", width=1,
+                                              style=QtCore.Qt.PenStyle.DashLine))
+        self.opt_smile.addItem(self.opt_smile_spot)
+
+        self.opt_oi = self._mk_qplot(glw, 0, 1, "OPEN INTEREST par strike (calls ↑ verts · puts ↓ rouges)")
+        self.opt_oi_c = pg.BarGraphItem(x=[], height=[], width=180, brush=(61, 220, 132, 170))
+        self.opt_oi_p = pg.BarGraphItem(x=[], height=[], width=180, brush=(255, 92, 92, 170))
+        self.opt_oi.addItem(self.opt_oi_c); self.opt_oi.addItem(self.opt_oi_p)
+        self.opt_oi_spot = pg.InfiniteLine(angle=90, pen=pg.mkPen("#f5c518", width=1,
+                                           style=QtCore.Qt.PenStyle.DashLine))
+        self.opt_oi.addItem(self.opt_oi_spot)
+
+        self.opt_pain = self._mk_qplot(glw, 1, 0, "COURBE MAX PAIN (minimum = aimant d'expiration)")
+        self.opt_pain_c = self.opt_pain.plot([], [], pen=pg.mkPen("#c48bff", width=2))
+        self.opt_pain_min = self.opt_pain.plot([], [], pen=None, symbol="star",
+                                               symbolSize=14, symbolBrush="#f5c518", symbolPen=None)
+        self.opt_pain_spot = pg.InfiniteLine(angle=90, pen=pg.mkPen("#f5c518", width=1,
+                                             style=QtCore.Qt.PenStyle.DashLine))
+        self.opt_pain.addItem(self.opt_pain_spot)
+
+        self.opt_term = self._mk_qplot(glw, 1, 1, "TERM STRUCTURE — IV ATM par échéance (jours)")
+        self.opt_term_c = self.opt_term.plot([], [], pen=pg.mkPen("#3ddc84", width=2),
+                                             symbol="o", symbolSize=6, symbolBrush="#3ddc84", symbolPen=None)
+        outer.addWidget(glw, 1)
+        self._opt_page = page
+
+        self._opt_timer = QtCore.QTimer(self)
+        self._opt_timer.timeout.connect(self._refresh_options_page)
+        self._opt_timer.start(4000)
+        return page
+
+    def _refresh_options_page(self):
+        if self.tabs.currentWidget() is not getattr(self, "_opt_page", None):
+            return
+        o = getattr(self, "quant", None) and self.quant.options
+        if not o or not o.get("smile"):
+            return
+        sm = o["smile"]; under = o["under"]
+        ks_c = [s["k"] for s in sm if s["civ"]]; iv_c = [s["civ"] for s in sm if s["civ"]]
+        ks_p = [s["k"] for s in sm if s["piv"]]; iv_p = [s["piv"] for s in sm if s["piv"]]
+        self.opt_smile_c.setData(ks_c, iv_c); self.opt_smile_p.setData(ks_p, iv_p)
+        self.opt_smile_spot.setValue(under)
+        ks = [s["k"] for s in sm]
+        width = (max(ks) - min(ks)) / max(1, len(ks)) * 0.42 if len(ks) > 1 else 180
+        self.opt_oi_c.setOpts(x=[k - width/2 for k in ks], height=[s["coi"] for s in sm], width=width)
+        self.opt_oi_p.setOpts(x=[k + width/2 for k in ks], height=[-s["poi"] for s in sm], width=width)
+        self.opt_oi_spot.setValue(under)
+        pains = [s["pain"] for s in sm]
+        self.opt_pain_c.setData(ks, pains)
+        if o.get("max_pain") is not None:
+            mp = o["max_pain"]
+            mp_pain = next((s["pain"] for s in sm if s["k"] == mp), min(pains))
+            self.opt_pain_min.setData([mp], [mp_pain])
+        self.opt_pain_spot.setValue(under)
+        terms = o.get("terms") or []
+        self.opt_term_c.setData([t["days"] for t in terms], [t["iv"] for t in terms])
+        # lecture synthétique
+        sk = o.get("skew"); mp = o.get("max_pain")
+        parts = [f"Spot {under:,.0f} · expi {o['front']} · IV ATM {o['atm_iv']:.0f}%"]
+        if sk is not None:
+            parts.append("peur côté BAS (puts chers)" if sk > 2 else
+                         "appétit côté HAUT (calls chers)" if sk < -2 else "skew neutre")
+        if mp:
+            parts.append(f"max pain {mp:,.0f} ({mp-under:+,.0f}$) → aimant vers "
+                         f"{'le haut' if mp > under else 'le bas'} à l'expiration")
+        if terms and len(terms) >= 2:
+            parts.append("term structure INVERSÉE = stress court terme"
+                         if terms[0]["iv"] > terms[-1]["iv"] + 3 else "term structure normale")
+        self.opt_read.setText("Lecture : " + "  ·  ".join(parts))
+
+    # ===========================================================
+    # PAGE MACRO — GRAPHIQUES INTRADAY (risk-on / risk-off)
+    # ===========================================================
+
+    def _build_macro_page(self):
+        from quant import MACRO_SYMBOLS
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
+
+        intro = QtWidgets.QLabel(
+            "MACRO intraday : la journée de chaque actif qui influence BTC. Nasdaq/S&P en "
+            "hausse + dollar/VIX en baisse = RISK-ON (vent porteur BTC). L'inverse = RISK-OFF. "
+            "Ligne pointillée = clôture de la veille (au-dessus = journée verte).")
+        intro.setWordWrap(True); intro.setStyleSheet(f"color:{DIM};font-size:12px;")
+        outer.addWidget(intro)
+
+        self.mac_read = QtWidgets.QLabel("Chargement macro…")
+        self.mac_read.setWordWrap(True)
+        self.mac_read.setStyleSheet(f"color:{TXT};font-size:14px;font-weight:800;"
+                                    f"background:{PANEL2};border:1px solid {BORDER};"
+                                    f"border-radius:10px;padding:12px;")
+        outer.addWidget(self.mac_read)
+
+        glw = pg.GraphicsLayoutWidget(); glw.setBackground("#0d1117")
+        self.mac_plots = {}
+        for i, (name, _s) in enumerate(MACRO_SYMBOLS):
+            plt = self._mk_qplot(glw, i // 3, i % 3, name)
+            curve = plt.plot([], [], pen=pg.mkPen("#4da3ff", width=1.6))
+            prev_l = plt.addLine(y=0, pen=pg.mkPen("#8a94a6", width=0.8,
+                                                   style=QtCore.Qt.PenStyle.DashLine))
+            self.mac_plots[name] = (plt, curve, prev_l)
+        outer.addWidget(glw, 1)
+        self._mac_page = page
+
+        self._mac_timer = QtCore.QTimer(self)
+        self._mac_timer.timeout.connect(self._refresh_macro_page)
+        self._mac_timer.start(5000)
+        return page
+
+    def _refresh_macro_page(self):
+        if self.tabs.currentWidget() is not getattr(self, "_mac_page", None):
+            return
+        m = getattr(self, "quant", None) and self.quant.macro
+        if not m:
+            return
+        for name, (plt, curve, prev_l) in self.mac_plots.items():
+            v = m.get(name) or {}
+            series = v.get("series") or []
+            if len(series) >= 2:
+                t0 = series[0][0]
+                xs = [(t - t0) / 3600.0 for t, _ in series]
+                ys = [c for _, c in series]
+                curve.setData(xs, ys)
+                chg = v.get("chg")
+                col = "#3ddc84" if (chg or 0) >= 0 else "#ff5c5c"
+                curve.setPen(pg.mkPen(col, width=1.6))
+                plt.setTitle(f"{name}   {v.get('price'):,.2f}   ({chg:+.2f}%)"
+                             if chg is not None else name, color=col, size="10pt")
+                if v.get("prev"):
+                    prev_l.setValue(v["prev"])
+        # verdict global (réutilise la logique du QUANT)
+        def chg(n):
+            v = m.get(n)
+            return v["chg"] if (v and v.get("chg") is not None) else 0.0
+        score = ((1 if chg("Nasdaq") > 0 else -1) + (1 if chg("S&P 500") > 0 else -1)
+                 + (1 if chg("Dollar (DXY)") < 0 else -1) + (1 if chg("VIX (peur)") < 0 else -1))
+        if score >= 2:
+            self.mac_read.setText("🟢 RISK-ON — actions en hausse, dollar/peur en baisse : "
+                                  "vent porteur pour BTC.")
+        elif score <= -2:
+            self.mac_read.setText("🔴 RISK-OFF — actions en baisse, dollar/peur en hausse : "
+                                  "vent contraire pour BTC, prudence sur les longs.")
+        else:
+            self.mac_read.setText("🟡 Macro mitigée — BTC trade surtout sur son propre flux.")
+
+    # ===========================================================
     # PAGE FOOTPRINT — ORDER FLOW PAR BOUGIE (institutionnel)
     # ===========================================================
 
@@ -3688,29 +3879,32 @@ class FootprintItem(pg.GraphicsObject):
             for lvl, (bv, sv) in cells.items():
                 r = mrect(i - 0.44, lvl - bucket / 2, 0.88, bucket)
                 tot = bv + sv
-                # fond des cellules gradué par volume (lecture type Bookmap/ATAS)
-                p.fillRect(r, QtGui.QColor(66, 90, 128, int(26 + 120 * min(1.0, tot / mx))))
-                # imbalances 3:1 (avec volume minimum pour éviter le bruit)
-                if bv >= 3 * sv and bv >= 0.4:
-                    p.fillRect(QtCore.QRectF(r.center().x(), r.top(), r.width() / 2, r.height()),
-                               QtGui.QColor(30, 170, 90, 120))
-                elif sv >= 3 * bv and sv >= 0.4:
-                    p.fillRect(QtCore.QRectF(r.left(), r.top(), r.width() / 2, r.height()),
-                               QtGui.QColor(190, 40, 40, 120))
+                # fond sombre de la cellule
+                p.fillRect(r, QtGui.QColor(28, 36, 48, 200))
+                # HISTOGRAMMES internes (style ATAS) : vente pousse depuis le centre
+                # vers la gauche, achat vers la droite, longueur ∝ volume
+                cx = r.center().x(); half = r.width() / 2 - 2
+                imb_b = bv >= 3 * sv and bv >= 0.4      # imbalance acheteuse
+                imb_s = sv >= 3 * bv and sv >= 0.4      # imbalance vendeuse
+                ws = half * min(1.0, sv / mx); wb = half * min(1.0, bv / mx)
+                p.fillRect(QtCore.QRectF(cx - ws, r.top() + 1, ws, r.height() - 2),
+                           QtGui.QColor(230, 60, 60, 235 if imb_s else 130))
+                p.fillRect(QtCore.QRectF(cx, r.top() + 1, wb, r.height() - 2),
+                           QtGui.QColor(40, 200, 115, 235 if imb_b else 130))
                 if lvl == poc:                       # POC de la bougie
-                    p.setPen(QtGui.QPen(POCC, 1.2)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                    p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
                     p.drawRect(r)
                 # texte "vente × achat" si la cellule est assez grande
                 if r.height() >= 13 and r.width() >= 64:
                     def fq(v):
                         return f"{v:.1f}" if v < 100 else f"{v:.0f}"
-                    p.setPen(RED)
+                    p.setPen(QtGui.QColor("#ffffff") if imb_s else RED)
                     p.drawText(QtCore.QRectF(r.left() + 2, r.top(), r.width()/2 - 5, r.height()),
                                int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(sv))
                     p.setPen(DIMC)
                     p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter), "×")
-                    p.setPen(GREEN)
-                    p.drawText(QtCore.QRectF(r.center().x() + 5, r.top(), r.width()/2 - 7, r.height()),
+                    p.setPen(QtGui.QColor("#ffffff") if imb_b else GREEN)
+                    p.drawText(QtCore.QRectF(cx + 5, r.top(), r.width()/2 - 7, r.height()),
                                int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(bv))
 
             # bougie OHLC par-dessus (fine, semi-transparente)

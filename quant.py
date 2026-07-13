@@ -100,11 +100,36 @@ class QuantFeed:
         pcr = (put_oi / call_oi) if call_oi else None
         # OI total toutes expirations (en BTC)
         total_oi = sum(o["oi"] for o in opts)
+
+        # SMILE / OI / PAIN par strike (front expiry, ±25% autour du spot)
+        smile = []
+        for k in sorted({o["strike"] for o in fe}):
+            if not (under * 0.75 <= k <= under * 1.25):
+                continue
+            civ = [o["iv"] for o in fe if o["cp"] == "C" and o["strike"] == k and o["iv"] > 0]
+            piv = [o["iv"] for o in fe if o["cp"] == "P" and o["strike"] == k and o["iv"] > 0]
+            smile.append({
+                "k": k,
+                "civ": civ[0] if civ else None, "piv": piv[0] if piv else None,
+                "coi": sum(o["oi"] for o in fe if o["cp"] == "C" and o["strike"] == k),
+                "poi": sum(o["oi"] for o in fe if o["cp"] == "P" and o["strike"] == k),
+                "pain": pain(k),
+            })
+        # TERM STRUCTURE : IV à la monnaie par expiration (7 premières)
+        terms = []
+        for exp in futures[:7]:
+            ee = [o for o in opts if o["exp"] == exp and o["iv"] > 0]
+            if ee:
+                atm_e = min(ee, key=lambda o: abs(o["strike"] - under))
+                terms.append({"label": exp.strftime("%d %b"),
+                              "days": max(0, (exp - today).days), "iv": atm_e["iv"]})
+
         return {
             "under": under, "front": front.strftime("%d %b %y"),
             "atm_iv": atm["iv"], "put_iv": put_iv, "call_iv": call_iv, "skew": skew,
             "max_pain": max_pain, "pcr": pcr,
             "put_oi": put_oi, "call_oi": call_oi, "total_oi": total_oi,
+            "smile": smile, "terms": terms,
             "ts": time.time(),
         }
 
@@ -122,16 +147,22 @@ class QuantFeed:
                 time.sleep(1)
 
     def _fetch_macro(self):
+        """Prix + variation + SÉRIE INTRADAY (5 min) de chaque actif macro."""
         out = {}
+        intra = "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=5m&range=1d"
         for name, sym in MACRO_SYMBOLS:
             try:
-                r = requests.get(YAHOO.format(sym), headers=UA, timeout=8)
-                meta = r.json()["chart"]["result"][0]["meta"]
+                r = requests.get(intra.format(sym), headers=UA, timeout=8)
+                res = r.json()["chart"]["result"][0]
+                meta = res["meta"]
                 px = meta.get("regularMarketPrice")
                 prev = meta.get("chartPreviousClose") or meta.get("previousClose")
                 chg = ((px - prev) / prev * 100) if (px and prev) else None
-                out[name] = {"price": px, "chg": chg}
+                ts = res.get("timestamp") or []
+                closes = (res.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
+                series = [(t, c) for t, c in zip(ts, closes) if c is not None]
+                out[name] = {"price": px, "chg": chg, "prev": prev, "series": series}
             except Exception:
-                out[name] = {"price": None, "chg": None}
+                out[name] = {"price": None, "chg": None, "series": []}
         out["ts"] = time.time()
         return out
