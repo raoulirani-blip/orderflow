@@ -1037,6 +1037,38 @@ class OrderFlowEngine:
                 deduped.append(c)
         return list(reversed(deduped))[:20]
 
+    def get_liq_clusters(self, window_s=3600, bucket=50.0):
+        """AIMANTS DE LIQUIDATION : regroupe les liquidations RÉELLES reçues (Bybit)
+        par niveau de prix. Une zone où beaucoup de longs (ou shorts) se sont fait
+        liquider = un aimant intraday (le prix y retourne souvent chasser le reste)."""
+        with self.agg._lock:
+            liqs = list(self.agg.liqs)
+        now = time.time()
+        clusters = defaultdict(lambda: {"long": 0.0, "short": 0.0})
+        for ts, side, price, qty in liqs:
+            if now - ts > window_s or not price:
+                continue
+            b = round(price / bucket) * bucket
+            clusters[b][side] += price * qty          # en $
+        out = [{"price": p, "long": v["long"], "short": v["short"],
+                "total": v["long"] + v["short"]}
+               for p, v in clusters.items() if (v["long"] + v["short"]) > 0]
+        out.sort(key=lambda x: x["total"], reverse=True)
+        return out[:12]
+
+    def leverage_liq_levels(self, mid):
+        """Niveaux de liquidation ESTIMÉS par levier depuis le prix actuel : les longs
+        se liquident SOUS le prix (-1/levier), les shorts AU-DESSUS (+1/levier).
+        Ce sont des zones-aimants classiques que le marché aime aller chasser."""
+        if not mid:
+            return []
+        out = []
+        for lev in (100, 50, 25, 10):
+            pct = 1.0 / lev
+            out.append({"lev": lev, "long_liq": mid * (1 - pct), "short_liq": mid * (1 + pct),
+                        "pct": pct * 100})
+        return out
+
     def multi_tf_text(self):
         """Synthèse MULTI-TIMEFRAME (5min → 3h) construite sur l'historique pré-chargé
         + le live : comment le marché a évolué à CHAQUE horizon. C'est la base pour une

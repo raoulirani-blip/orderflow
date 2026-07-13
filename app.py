@@ -2438,6 +2438,22 @@ class Cockpit(QtWidgets.QMainWindow):
         self.q_macro_read.setStyleSheet(f"color:{TXT};font-size:14px;font-weight:700;"
                                         f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:12px;")
         outer.addWidget(self.q_macro_read)
+
+        # ---- AIMANTS DE LIQUIDATION ----
+        outer.addWidget(self._h("AIMANTS DE LIQUIDATION  ·  où le prix est aspiré  (chasse aux liquidations)"))
+        lrow = QtWidgets.QHBoxLayout(); lrow.setSpacing(10)
+        self.q_lev = QtWidgets.QLabel("…")
+        self.q_lev.setWordWrap(True)
+        self.q_lev.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.q_lev.setStyleSheet(f"color:{TXT};font-size:13px;line-height:150%;background:{PANEL};"
+                                 f"border:1px solid {BORDER};border-radius:10px;padding:12px;")
+        lrow.addWidget(self.q_lev, 1)
+        self.q_liq_table = QtWidgets.QTableWidget(0, 3)
+        self.q_liq_table.setHorizontalHeaderLabels(["Prix", "Type liquidé", "Montant $"])
+        self._prep(self.q_liq_table)
+        self.q_liq_table.setMaximumHeight(230)
+        lrow.addWidget(self.q_liq_table, 1)
+        outer.addLayout(lrow)
         outer.addStretch(1)
         return page
 
@@ -2498,6 +2514,35 @@ class Cockpit(QtWidgets.QMainWindow):
             else:
                 self.q_macro_read.setText("🟡 Macro mitigée : pas de vent de fond marqué pour BTC "
                                           "(BTC trade surtout sur son propre flux).")
+
+        # ---- aimants de liquidation ----
+        mid = (self._last_state or {}).get("mid")
+        if mid:
+            levs = self.engine.leverage_liq_levels(mid)
+            html = [f"Prix actuel : <b style='color:{ACCENT};'>{mid:,.0f}</b><br>"
+                    f"<span style='color:{DIM};'>Niveaux où les positions à levier sautent "
+                    f"(aimants classiques) :</span>"]
+            for lv in levs[:3]:
+                html.append(
+                    f"<b>{lv['lev']}x</b> · longs liquidés "
+                    f"<span style='color:{RED};'>{lv['long_liq']:,.0f}</span> "
+                    f"(-{lv['pct']:.0f}%) · shorts liquidés "
+                    f"<span style='color:{GREEN};'>{lv['short_liq']:,.0f}</span> (+{lv['pct']:.0f}%)")
+            self.q_lev.setText("<br>".join(html))
+        clusters = self.engine.get_liq_clusters(3600, 50.0)
+        self.q_liq_table.setRowCount(len(clusters))
+        for i, c in enumerate(clusters):
+            longs = c["long"] >= c["short"]
+            typ = "longs" if longs else "shorts"
+            cells = [
+                (f"{c['price']:,.0f}", TXT),
+                (f"{typ} liquidés", RED if longs else GREEN),
+                (f"{c['total']/1e6:.2f} M$" if c["total"] >= 1e6 else f"{c['total']/1e3:.0f} k$", AMBER),
+            ]
+            for j, (v, cc) in enumerate(cells):
+                it = QtWidgets.QTableWidgetItem(v)
+                it.setForeground(QtGui.QColor(cc))
+                self.q_liq_table.setItem(i, j, it)
 
     # ===========================================================
     # PAGE 8 — NEWS CRYPTO + GUIDE MACRO
