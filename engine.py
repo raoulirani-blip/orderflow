@@ -1055,6 +1055,48 @@ class OrderFlowEngine:
                 deduped.append(c)
         return list(reversed(deduped))[:20]
 
+    def get_footprint(self, tf_s=60, bucket=20.0, n_bars=26):
+        """FOOTPRINT institutionnel : pour chaque bougie de tf_s secondes, le volume
+        VENTE × ACHAT exécuté à CHAQUE niveau de prix (cellules de bucket $), plus
+        OHLC, delta et totaux. Cache incrémental : on ne traite que les NOUVEAUX
+        trades depuis le dernier appel -> coût quasi nul, aucune latence UI."""
+        key = (tf_s, bucket)
+        if getattr(self, "_fp_key", None) != key:
+            self._fp_key = key
+            self._fp_bars = {}
+            # au 1er appel on ne remonte que la fenêtre affichée (pas 1h de trades)
+            self._fp_last_ts = time.time() - (n_bars + 2) * tf_s
+        with self.agg._lock:
+            new = []
+            for t in reversed(self.agg.trades_hist):
+                if t[0] <= self._fp_last_ts:
+                    break
+                new.append(t)
+        new.reverse()
+        for ts, price, qty, is_sell in new:
+            b0 = int(ts // tf_s) * tf_s
+            bar = self._fp_bars.get(b0)
+            if bar is None:
+                bar = self._fp_bars[b0] = {"t0": b0, "o": price, "h": price, "l": price,
+                                           "c": price, "cells": {}, "buy": 0.0, "sell": 0.0}
+            lvl = round(price / bucket) * bucket
+            cell = bar["cells"].setdefault(lvl, [0.0, 0.0])   # [achat, vente]
+            if is_sell:
+                cell[1] += qty; bar["sell"] += qty
+            else:
+                cell[0] += qty; bar["buy"] += qty
+            if price > bar["h"]: bar["h"] = price
+            if price < bar["l"]: bar["l"] = price
+            bar["c"] = price
+        if new:
+            self._fp_last_ts = new[-1][0]
+        # purge des bougies trop vieilles
+        if len(self._fp_bars) > n_bars + 6:
+            for k in sorted(self._fp_bars)[:-(n_bars + 3)]:
+                self._fp_bars.pop(k, None)
+        bars = [self._fp_bars[k] for k in sorted(self._fp_bars)][-n_bars:]
+        return {"bars": bars, "tf": tf_s, "bucket": bucket}
+
     def get_liq_clusters(self, window_s=3600, bucket=50.0):
         """AIMANTS DE LIQUIDATION : regroupe les liquidations RÉELLES reçues (Bybit)
         par niveau de prix. Une zone où beaucoup de longs (ou shorts) se sont fait

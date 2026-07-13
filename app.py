@@ -222,6 +222,12 @@ class Cockpit(QtWidgets.QMainWindow):
         # --- Quant : options Deribit + macro ---
         self.tabs.addTab(self._build_quant_page(), "  📐  QUANT  ")
 
+        # --- Footprint (order flow par bougie) ---
+        self.tabs.addTab(self._build_footprint_page(), "  👣  FOOTPRINT  ")
+
+        # --- Z-scores multi-échelles ---
+        self.tabs.addTab(self._build_zscore_page(), "  📉  Z-SCORES  ")
+
         # --- Calculateur de position (money management) ---
         self.tabs.addTab(self._build_calc_page(), "  🧮  CALCULATEUR  ")
 
@@ -2626,6 +2632,263 @@ class Cockpit(QtWidgets.QMainWindow):
                 self.q_liq_table.setItem(i, j, it)
 
     # ===========================================================
+    # PAGE FOOTPRINT — ORDER FLOW PAR BOUGIE (institutionnel)
+    # ===========================================================
+
+    def _build_footprint_page(self):
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
+
+        intro = QtWidgets.QLabel(
+            "FOOTPRINT : chaque bougie éclatée prix par prix — volume "
+            "<span style='color:#ff5c5c;'>VENDU</span> × "
+            "<span style='color:#3ddc84;'>ACHETÉ</span> à chaque niveau. Fond des cellules = "
+            "volume (plus c'est clair, plus ça traite). Moitié colorée = IMBALANCE ≥3:1. "
+            "Cadre jaune = POC de la bougie. Sous chaque barre : Δ delta et volume. "
+            "En bas : DELTA CUMULÉ. Se remplit avec les trades live.")
+        intro.setWordWrap(True); intro.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        intro.setStyleSheet(f"color:{DIM};font-size:12px;")
+        outer.addWidget(intro)
+
+        ctrl = QtWidgets.QHBoxLayout(); ctrl.setSpacing(8)
+        def combo(items, cur):
+            c = QtWidgets.QComboBox(); c.addItems(items); c.setCurrentText(cur)
+            c.setStyleSheet(f"QComboBox{{background:{PANEL};border:1px solid {BORDER};"
+                            f"border-radius:8px;color:{TXT};padding:6px 12px;font-weight:700;}}")
+            return c
+        lbl = QtWidgets.QLabel("BOUGIE :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        ctrl.addWidget(lbl)
+        self.fp_tf = combo(["1 min", "2 min", "5 min"], "1 min")
+        ctrl.addWidget(self.fp_tf)
+        lbl2 = QtWidgets.QLabel("  CELLULE :"); lbl2.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        ctrl.addWidget(lbl2)
+        self.fp_bucket = combo(["10 $", "20 $", "25 $", "50 $"], "20 $")
+        ctrl.addWidget(self.fp_bucket)
+        self.fp_lock = QtWidgets.QCheckBox("🔒 figer l'échelle (zoom manuel)")
+        self.fp_lock.setStyleSheet(f"QCheckBox{{color:{TXT};font-size:12px;font-weight:600;}}")
+        ctrl.addWidget(self.fp_lock)
+        self.fp_status = QtWidgets.QLabel("…")
+        self.fp_status.setStyleSheet(f"color:{DIM};font-size:11px;")
+        ctrl.addWidget(self.fp_status)
+        ctrl.addStretch(1)
+        outer.addLayout(ctrl)
+
+        glw = pg.GraphicsLayoutWidget()
+        glw.setBackground("#0d1117")
+        self.fp_plot = glw.addPlot(row=0, col=0)
+        self.fp_plot.showGrid(x=False, y=True, alpha=0.10)
+        self.fp_plot.getAxis("left").setTextPen(pg.mkPen("#8a94a6"))
+        self.fp_plot.getAxis("bottom").setTextPen(pg.mkPen("#8a94a6"))
+        self.fp_item = FootprintItem()
+        self.fp_plot.addItem(self.fp_item)
+        self.fp_cum = glw.addPlot(row=1, col=0)
+        self.fp_cum.setMaximumHeight(150)
+        self.fp_cum.showGrid(x=False, y=True, alpha=0.10)
+        self.fp_cum.getAxis("left").setTextPen(pg.mkPen("#8a94a6"))
+        self.fp_cum.getAxis("bottom").setTextPen(pg.mkPen("#8a94a6"))
+        self.fp_cum.setLabel("left", "Δ cumulé", color="#8a94a6")
+        self.fp_cum.setXLink(self.fp_plot)
+        self.fp_cum_curve = self.fp_cum.plot([], [], pen=pg.mkPen("#f5c518", width=2),
+                                             symbol="o", symbolSize=4,
+                                             symbolBrush="#f5c518", symbolPen=None)
+        self.fp_cum.addLine(y=0, pen=pg.mkPen("#555", width=0.7))
+        glw.ci.layout.setRowStretchFactor(0, 4)
+        glw.ci.layout.setRowStretchFactor(1, 1)
+        outer.addWidget(glw, 1)
+        self._fp_page = page
+
+        self._fp_timer = QtCore.QTimer(self)
+        self._fp_timer.timeout.connect(self._refresh_footprint)
+        self._fp_timer.start(2000)
+        return page
+
+    def _refresh_footprint(self):
+        # ne travaille que si la page est visible (zéro coût sinon)
+        if self.tabs.currentWidget() is not getattr(self, "_fp_page", None):
+            return
+        import time as _t
+        tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
+        bucket = float(self.fp_bucket.currentText().replace("$", "").strip())
+        fp = self.engine.get_footprint(tf, bucket, n_bars=26)
+        bars = fp["bars"]
+        if not bars:
+            self.fp_status.setText("· en attente de trades live…")
+            return
+        n = len(bars)
+        tot_trades = sum(b["buy"] + b["sell"] for b in bars)
+        self.fp_status.setText(f"· {n} bougies · {tot_trades:,.0f} BTC traités")
+        y_lo = min(b["l"] for b in bars) - 4.2 * bucket
+        y_hi = max(b["h"] for b in bars) + 1.6 * bucket
+        self.fp_item.setFPData(bars, bucket, y_lo, y_hi)
+        if not self.fp_lock.isChecked():
+            self.fp_plot.setYRange(y_lo, y_hi, padding=0)
+            self.fp_plot.setXRange(-0.6, n + 0.4, padding=0)
+        # axe temps (HH:MM sous chaque 2e bougie)
+        ticks = [(i, _t.strftime("%H:%M", _t.localtime(b["t0"])))
+                 for i, b in enumerate(bars) if i % 2 == 0]
+        self.fp_plot.getAxis("bottom").setTicks([ticks])
+        self.fp_cum.getAxis("bottom").setTicks([ticks])
+        # delta cumulé
+        cum = []; c = 0.0
+        for b in bars:
+            c += b["buy"] - b["sell"]; cum.append(c)
+        self.fp_cum_curve.setData(list(range(n)), cum)
+
+    # ===========================================================
+    # PAGE Z-SCORES — EXTRÊMES STATISTIQUES MULTI-ÉCHELLES
+    # ===========================================================
+
+    ZS_METRICS = ["CVD 1min", "CVD 5min", "CVD 15min", "Agresseurs %", "Tape (tr/s)",
+                  "Imbalance %", "OI Δ5min %", "Funding %", "Instit Δ5min"]
+
+    def _zs_sample(self):
+        """Échantillonne toutes les métriques (5s) — buffer 3h pour les z-scores."""
+        import time as _t
+        s = self._last_state or {}
+        if not s.get("mid") or s.get("warming"):
+            return
+        cv = self.engine.get_cvd_windows()
+        pos = self.engine.get_positioning()
+        seg = self.engine.get_flow_segments(300)
+        oi = pos.get("oi") or {}
+        f = pos.get("funding") or {}
+
+        def cvd(m):
+            d = cv.get(m, {})
+            return d.get("cvd", 0.0) if d.get("ready") else 0.0
+        self._zs_buf.append({
+            "t": _t.time(),
+            "CVD 1min": cvd(1), "CVD 5min": cvd(5), "CVD 15min": cvd(15),
+            "Agresseurs %": s.get("aggressor_ratio", 0.5) * 100,
+            "Tape (tr/s)": s.get("tape_speed", 0.0),
+            "Imbalance %": s.get("imbalance", 0.5) * 100,
+            "OI Δ5min %": oi.get("chg_5m_pct", 0.0),
+            "Funding %": f.get("rate_pct", 0.0) or 0.0,
+            "Instit Δ5min": seg["inst"]["delta"] if seg else 0.0,
+        })
+        if self.tabs.currentWidget() is getattr(self, "_zs_page", None):
+            self._refresh_zscores()
+
+    @staticmethod
+    def _zscore(vals):
+        a = np.asarray(vals, dtype=float)
+        sd = a.std()
+        return float((a[-1] - a.mean()) / sd) if sd > 1e-9 else 0.0
+
+    def _build_zscore_page(self):
+        from collections import deque
+        self._zs_buf = deque(maxlen=2160)          # 3 h à 5 s
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
+
+        intro = QtWidgets.QLabel(
+            "Z-SCORES : à quel point chaque métrique est ANORMALE par rapport à son "
+            "comportement récent. z = (valeur − moyenne) / écart-type, calculé sur 3 "
+            "échelles (15 min / 1 h / 3 h). |z| ≥ 2 = anormal (2,3% du temps), |z| ≥ 3 = "
+            "extrême (0,1%). Intraday, un extrême statistique = souvent un point de "
+            "bascule ou le début d'un mouvement. Courbes : valeur brute + moyenne (gris) "
+            "± 2σ (pointillés ambre) sur 1 h.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color:{DIM};font-size:12px;")
+        outer.addWidget(intro)
+
+        # tableau récapitulatif multi-échelles
+        cols = ["Métrique", "Valeur", "z 15min", "z 1h", "z 3h", "Lecture"]
+        self.zs_table = QtWidgets.QTableWidget(len(self.ZS_METRICS), len(cols))
+        self.zs_table.setHorizontalHeaderLabels(cols)
+        self._prep(self.zs_table)
+        self.zs_table.setMaximumHeight(320)
+        outer.addWidget(self.zs_table)
+
+        # grille de vrais graphiques 2D (3×3)
+        glw = pg.GraphicsLayoutWidget()
+        glw.setBackground("#0d1117")
+        self.zs_plots = {}
+        for i, mname in enumerate(self.ZS_METRICS):
+            plt = glw.addPlot(row=i // 3, col=i % 3)
+            plt.showGrid(x=False, y=True, alpha=0.08)
+            plt.setTitle(mname, color="#aab4c0", size="9pt")
+            plt.getAxis("left").setTextPen(pg.mkPen("#66707e"))
+            plt.getAxis("bottom").setTextPen(pg.mkPen("#66707e"))
+            curve = plt.plot([], [], pen=pg.mkPen("#4da3ff", width=1.4))
+            mean_l = plt.addLine(y=0, pen=pg.mkPen("#8a94a6", width=0.8))
+            up_l = plt.addLine(y=0, pen=pg.mkPen("#f5c518", width=0.8,
+                                                 style=QtCore.Qt.PenStyle.DashLine))
+            dn_l = plt.addLine(y=0, pen=pg.mkPen("#f5c518", width=0.8,
+                                                 style=QtCore.Qt.PenStyle.DashLine))
+            self.zs_plots[mname] = (plt, curve, mean_l, up_l, dn_l)
+        outer.addWidget(glw, 1)
+        self._zs_page = page
+
+        self._zs_timer = QtCore.QTimer(self)
+        self._zs_timer.timeout.connect(self._zs_sample)
+        self._zs_timer.start(5000)
+        return page
+
+    def _refresh_zscores(self):
+        buf = list(self._zs_buf)
+        if len(buf) < 6:
+            return
+        now = buf[-1]["t"]
+
+        def zs_read(metric, z):
+            if abs(z) < 2:
+                return ""
+            hi = z > 0
+            texts = {
+                "CVD 1min": ("pression ACHETEUSE anormale", "pression VENDEUSE anormale"),
+                "CVD 5min": ("achat net anormal", "vente nette anormale"),
+                "CVD 15min": ("tendance acheteuse forte (fond)", "tendance vendeuse forte (fond)"),
+                "Agresseurs %": ("acheteurs ultra-dominants", "vendeurs ultra-dominants"),
+                "Tape (tr/s)": ("activité explosive", "marché anormalement mort"),
+                "Imbalance %": ("carnet très penché achat", "carnet très penché vente"),
+                "OI Δ5min %": ("levier qui RENTRE vite", "positions qui FERMENT vite"),
+                "Funding %": ("longs sur-payés (risque flush)", "shorts sur-payés (risque squeeze)"),
+                "Instit Δ5min": ("les GROS achètent anormalement", "les GROS vendent anormalement"),
+            }
+            a, b = texts.get(metric, ("anormalement haut", "anormalement bas"))
+            return (a if hi else b) + (" ⚠ EXTRÊME" if abs(z) >= 3 else "")
+
+        for i, mname in enumerate(self.ZS_METRICS):
+            vals = [x[mname] for x in buf]
+            cur = vals[-1]
+            zz = {}
+            for scale, nsamp in (("15min", 180), ("1h", 720), ("3h", len(vals))):
+                sub = vals[-nsamp:]
+                zz[scale] = self._zscore(sub) if len(sub) >= 24 else None
+            worst = max((abs(v) for v in zz.values() if v is not None), default=0)
+            zmax = next((v for v in zz.values() if v is not None and abs(v) == worst), 0)
+            cells = [(mname, TXT), (f"{cur:+.2f}" if "CVD" in mname or "Δ" in mname
+                                    else f"{cur:.2f}", ACCENT)]
+            for scale in ("15min", "1h", "3h"):
+                z = zz[scale]
+                if z is None:
+                    cells.append(("—", DIM))
+                else:
+                    col = RED if abs(z) >= 3 else (AMBER if abs(z) >= 2 else
+                                                   TXT if abs(z) >= 1 else DIM)
+                    cells.append((f"{z:+.1f}", col))
+            read = zs_read(mname, zmax)
+            cells.append((read, AMBER if read else DIM))
+            for j, (v, cc) in enumerate(cells):
+                it = QtWidgets.QTableWidgetItem(v)
+                it.setForeground(QtGui.QColor(cc))
+                if j in (2, 3, 4) and v not in ("—",) and abs(float(v)) >= 2:
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                self.zs_table.setItem(i, j, it)
+
+        # graphiques : valeur brute + moyenne ±2σ (fenêtre 1h)
+        for mname, (plt, curve, mean_l, up_l, dn_l) in self.zs_plots.items():
+            vals = [x[mname] for x in buf]
+            xs = [(x["t"] - now) / 60.0 for x in buf]          # minutes (négatif → 0)
+            curve.setData(xs, vals)
+            sub = np.asarray(vals[-720:], dtype=float)
+            m, sd = float(sub.mean()), float(sub.std())
+            mean_l.setValue(m); up_l.setValue(m + 2 * sd); dn_l.setValue(m - 2 * sd)
+
+    # ===========================================================
     # PAGE 8 — NEWS CRYPTO + GUIDE MACRO
     # ===========================================================
 
@@ -3376,6 +3639,102 @@ class Cockpit(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.engine.stop(); super().closeEvent(e)
+
+
+class FootprintItem(pg.GraphicsObject):
+    """Rendu FOOTPRINT professionnel : cellules vente×achat par prix, imbalances 3:1
+    surlignées, POC encadré, bougie OHLC par-dessus, delta+volume sous chaque barre.
+    Tout est peint en UNE passe (rapide) avec du texte en pixels (net à tout zoom)."""
+
+    def __init__(self):
+        super().__init__()
+        self._bars = []
+        self._bucket = 20.0
+        self._br = QtCore.QRectF(0, 0, 1, 1)
+
+    def setFPData(self, bars, bucket, y_lo, y_hi):
+        self._bars = bars
+        self._bucket = bucket
+        self._br = QtCore.QRectF(-0.6, y_lo, len(bars) + 1.2, max(1e-6, y_hi - y_lo))
+        self.prepareGeometryChange()
+        self.update()
+
+    def boundingRect(self):
+        return self._br
+
+    def paint(self, p, *args):
+        bars, bucket = self._bars, self._bucket
+        if not bars:
+            return
+        tr = p.transform()
+        p.save()
+        p.resetTransform()
+        font = QtGui.QFont("Consolas", 8)
+        small = QtGui.QFont("Consolas", 8)
+        p.setFont(font)
+
+        def mrect(x, y, w, h):
+            return tr.mapRect(QtCore.QRectF(x, y, w, h)).normalized()
+
+        GREEN = QtGui.QColor("#3ddc84"); RED = QtGui.QColor("#ff5c5c")
+        DIMC = QtGui.QColor("#8a94a6"); POCC = QtGui.QColor("#f5c518")
+
+        for i, bar in enumerate(bars):
+            cells = bar["cells"]
+            if not cells:
+                continue
+            mx = max(c[0] + c[1] for c in cells.values()) or 1.0
+            poc = max(cells, key=lambda k: cells[k][0] + cells[k][1])
+            for lvl, (bv, sv) in cells.items():
+                r = mrect(i - 0.44, lvl - bucket / 2, 0.88, bucket)
+                tot = bv + sv
+                # fond des cellules gradué par volume (lecture type Bookmap/ATAS)
+                p.fillRect(r, QtGui.QColor(66, 90, 128, int(26 + 120 * min(1.0, tot / mx))))
+                # imbalances 3:1 (avec volume minimum pour éviter le bruit)
+                if bv >= 3 * sv and bv >= 0.4:
+                    p.fillRect(QtCore.QRectF(r.center().x(), r.top(), r.width() / 2, r.height()),
+                               QtGui.QColor(30, 170, 90, 120))
+                elif sv >= 3 * bv and sv >= 0.4:
+                    p.fillRect(QtCore.QRectF(r.left(), r.top(), r.width() / 2, r.height()),
+                               QtGui.QColor(190, 40, 40, 120))
+                if lvl == poc:                       # POC de la bougie
+                    p.setPen(QtGui.QPen(POCC, 1.2)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                    p.drawRect(r)
+                # texte "vente × achat" si la cellule est assez grande
+                if r.height() >= 13 and r.width() >= 64:
+                    def fq(v):
+                        return f"{v:.1f}" if v < 100 else f"{v:.0f}"
+                    p.setPen(RED)
+                    p.drawText(QtCore.QRectF(r.left() + 2, r.top(), r.width()/2 - 5, r.height()),
+                               int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(sv))
+                    p.setPen(DIMC)
+                    p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter), "×")
+                    p.setPen(GREEN)
+                    p.drawText(QtCore.QRectF(r.center().x() + 5, r.top(), r.width()/2 - 7, r.height()),
+                               int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(bv))
+
+            # bougie OHLC par-dessus (fine, semi-transparente)
+            up = bar["c"] >= bar["o"]
+            cc = QtGui.QColor("#3ddc84") if up else QtGui.QColor("#ff5c5c")
+            cc.setAlpha(200)
+            wick = mrect(i - 0.015, bar["l"], 0.03, bar["h"] - bar["l"])
+            p.fillRect(wick, cc)
+            body_top = max(bar["o"], bar["c"]); body_h = abs(bar["c"] - bar["o"]) or bucket * 0.06
+            body = mrect(i - 0.09, body_top - body_h, 0.18, body_h)
+            p.fillRect(body, cc)
+
+            # delta + volume sous la barre
+            delta = bar["buy"] - bar["sell"]; vol = bar["buy"] + bar["sell"]
+            fr = mrect(i - 0.5, bar["l"] - 2.6 * bucket, 1.0, 1.1 * bucket)
+            p.setPen(GREEN if delta >= 0 else RED)
+            p.drawText(fr, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                       f"Δ{delta:+.1f}")
+            fr2 = mrect(i - 0.5, bar["l"] - 3.7 * bucket, 1.0, 1.0 * bucket)
+            p.setPen(DIMC); p.setFont(small)
+            p.drawText(fr2, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                       f"{vol:.0f}")
+            p.setFont(font)
+        p.restore()
 
 
 def main():
