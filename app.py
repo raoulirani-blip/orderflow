@@ -2832,12 +2832,13 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
 
         intro = QtWidgets.QLabel(
-            "FOOTPRINT : chaque bougie éclatée prix par prix — volume "
-            "<span style='color:#ff5c5c;'>VENDU</span> × "
-            "<span style='color:#3ddc84;'>ACHETÉ</span> à chaque niveau. Fond des cellules = "
-            "volume (plus c'est clair, plus ça traite). Moitié colorée = IMBALANCE ≥3:1. "
-            "Cadre jaune = POC de la bougie. Sous chaque barre : Δ delta et volume. "
-            "En bas : DELTA CUMULÉ. Se remplit avec les trades live.")
+            "FOOTPRINT : chaque bougie éclatée prix par prix. Mode <b>Δ net</b> : chaque "
+            "cellule = delta net (achat−vente) au niveau — <span style='color:#3ddc84;'>vert "
+            "= achat net</span>, <span style='color:#ff5c5c;'>rouge = vente nette</span>, "
+            "intensité du fond ∝ volume traité, cercle = plus forte imbalance de la bougie. "
+            "Mode <b>Vente × Achat</b> : les deux volumes bruts. Cadre jaune = POC. "
+            "Marqueurs auto : ▼▲DIV = divergence delta · ABS = absorption. "
+            "En bas : DELTA CUMULÉ. Historique pré-chargé au lancement.")
         intro.setWordWrap(True); intro.setTextFormat(QtCore.Qt.TextFormat.RichText)
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
@@ -2848,7 +2849,11 @@ class Cockpit(QtWidgets.QMainWindow):
             c.setStyleSheet(f"QComboBox{{background:{PANEL};border:1px solid {BORDER};"
                             f"border-radius:8px;color:{TXT};padding:6px 12px;font-weight:700;}}")
             return c
-        lbl = QtWidgets.QLabel("BOUGIE :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        lbl0 = QtWidgets.QLabel("MODE :"); lbl0.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        ctrl.addWidget(lbl0)
+        self.fp_mode = combo(["Δ net (delta)", "Vente × Achat"], "Δ net (delta)")
+        ctrl.addWidget(self.fp_mode)
+        lbl = QtWidgets.QLabel("  BOUGIE :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl)
         self.fp_tf = combo(["1 min", "2 min", "5 min"], "1 min")
         ctrl.addWidget(self.fp_tf)
@@ -2864,6 +2869,14 @@ class Cockpit(QtWidgets.QMainWindow):
         ctrl.addWidget(self.fp_status)
         ctrl.addStretch(1)
         outer.addLayout(ctrl)
+
+        # bandeau SIGNAUX (divergences delta, absorptions détectées)
+        self.fp_signals_lbl = QtWidgets.QLabel("Signaux : …")
+        self.fp_signals_lbl.setWordWrap(True)
+        self.fp_signals_lbl.setStyleSheet(f"color:{TXT};font-size:12px;font-weight:700;"
+                                          f"background:{PANEL2};border:1px solid {BORDER};"
+                                          f"border-radius:8px;padding:8px;")
+        outer.addWidget(self.fp_signals_lbl)
 
         glw = pg.GraphicsLayoutWidget()
         glw.setBackground("#0d1117")
@@ -2909,9 +2922,40 @@ class Cockpit(QtWidgets.QMainWindow):
         n = len(bars)
         tot_trades = sum(b["buy"] + b["sell"] for b in bars)
         self.fp_status.setText(f"· {n} bougies · {tot_trades:,.0f} BTC traités")
-        y_lo = min(b["l"] for b in bars) - 4.2 * bucket
-        y_hi = max(b["h"] for b in bars) + 1.6 * bucket
-        self.fp_item.setFPData(bars, bucket, y_lo, y_hi)
+
+        # ---- SIGNAUX : divergence delta + absorption (couche spec) ----
+        import time as _tt
+        signals = []
+        for i in range(2, n):
+            b = bars[i]; prev = bars[i - 1]
+            d_i = b["buy"] - b["sell"]; d_p = prev["buy"] - prev["sell"]
+            look = bars[max(0, i - 5):i]
+            if look:
+                if b["h"] > max(x["h"] for x in look) and d_i < d_p and d_i < 0:
+                    signals.append({"i": i, "t": "div_bear"})     # nouveau haut, delta qui rétrécit
+                if b["l"] < min(x["l"] for x in look) and d_i > d_p and d_i > 0:
+                    signals.append({"i": i, "t": "div_bull"})
+            if i < n - 1 and b["cells"]:
+                nxt = bars[i + 1]
+                low_lvl = min(b["cells"]); high_lvl = max(b["cells"])
+                lb, ls = b["cells"][low_lvl]; hb, hs = b["cells"][high_lvl]
+                # grosses ventes au plus bas mais le niveau TIENT -> absorption acheteuse
+                if ls >= 2 * lb and ls >= 0.8 and nxt["l"] >= b["l"]:
+                    signals.append({"i": i, "t": "abs_bull"})
+                # gros achats au plus haut mais ça ne passe pas -> absorption vendeuse
+                if hb >= 2 * hs and hb >= 0.8 and nxt["h"] <= b["h"]:
+                    signals.append({"i": i, "t": "abs_bear"})
+        names = {"div_bear": "▼ divergence baissière", "div_bull": "▲ divergence haussière",
+                 "abs_bull": "absorption ACHETEUSE (plancher)", "abs_bear": "absorption VENDEUSE (plafond)"}
+        recent = [f"{_tt.strftime('%H:%M', _tt.localtime(bars[s['i']]['t0']))} {names[s['t']]}"
+                  for s in signals[-5:]]
+        self.fp_signals_lbl.setText("Signaux : " + ("  ·  ".join(recent) if recent
+                                    else "aucun (divergences delta et absorptions s'affichent ici)"))
+
+        mode = "delta" if self.fp_mode.currentText().startswith("Δ") else "split"
+        y_lo = min(b["l"] for b in bars) - 6.2 * bucket
+        y_hi = max(b["h"] for b in bars) + 1.8 * bucket
+        self.fp_item.setFPData(bars, bucket, y_lo, y_hi, mode=mode, signals=signals)
         if not self.fp_lock.isChecked():
             self.fp_plot.setYRange(y_lo, y_hi, padding=0)
             self.fp_plot.setXRange(-0.6, n + 0.4, padding=0)
@@ -3841,11 +3885,15 @@ class FootprintItem(pg.GraphicsObject):
         super().__init__()
         self._bars = []
         self._bucket = 20.0
+        self._mode = "delta"          # "delta" (net) ou "split" (vente × achat)
+        self._signals = []            # [{'i': idx bougie, 't': type}]
         self._br = QtCore.QRectF(0, 0, 1, 1)
 
-    def setFPData(self, bars, bucket, y_lo, y_hi):
+    def setFPData(self, bars, bucket, y_lo, y_hi, mode="delta", signals=None):
         self._bars = bars
         self._bucket = bucket
+        self._mode = mode
+        self._signals = signals or []
         self._br = QtCore.QRectF(-0.6, y_lo, len(bars) + 1.2, max(1e-6, y_hi - y_lo))
         self.prepareGeometryChange()
         self.update()
@@ -3876,36 +3924,59 @@ class FootprintItem(pg.GraphicsObject):
                 continue
             mx = max(c[0] + c[1] for c in cells.values()) or 1.0
             poc = max(cells, key=lambda k: cells[k][0] + cells[k][1])
+            # ligne (niveau) avec le plus fort |delta| de la bougie -> bulle
+            max_lvl = max(cells, key=lambda k: abs(cells[k][0] - cells[k][1])) \
+                if self._mode == "delta" and cells else None
+
             for lvl, (bv, sv) in cells.items():
                 r = mrect(i - 0.44, lvl - bucket / 2, 0.88, bucket)
                 tot = bv + sv
-                # fond sombre de la cellule
-                p.fillRect(r, QtGui.QColor(28, 36, 48, 200))
-                # HISTOGRAMMES internes (style ATAS) : vente pousse depuis le centre
-                # vers la gauche, achat vers la droite, longueur ∝ volume
-                cx = r.center().x(); half = r.width() / 2 - 2
-                imb_b = bv >= 3 * sv and bv >= 0.4      # imbalance acheteuse
-                imb_s = sv >= 3 * bv and sv >= 0.4      # imbalance vendeuse
-                ws = half * min(1.0, sv / mx); wb = half * min(1.0, bv / mx)
-                p.fillRect(QtCore.QRectF(cx - ws, r.top() + 1, ws, r.height() - 2),
-                           QtGui.QColor(230, 60, 60, 235 if imb_s else 130))
-                p.fillRect(QtCore.QRectF(cx, r.top() + 1, wb, r.height() - 2),
-                           QtGui.QColor(40, 200, 115, 235 if imb_b else 130))
-                if lvl == poc:                       # POC de la bougie
-                    p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                    p.drawRect(r)
-                # texte "vente × achat" si la cellule est assez grande
-                if r.height() >= 13 and r.width() >= 64:
-                    def fq(v):
-                        return f"{v:.1f}" if v < 100 else f"{v:.0f}"
-                    p.setPen(QtGui.QColor("#ffffff") if imb_s else RED)
-                    p.drawText(QtCore.QRectF(r.left() + 2, r.top(), r.width()/2 - 5, r.height()),
-                               int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(sv))
-                    p.setPen(DIMC)
-                    p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter), "×")
-                    p.setPen(QtGui.QColor("#ffffff") if imb_b else GREEN)
-                    p.drawText(QtCore.QRectF(cx + 5, r.top(), r.width()/2 - 7, r.height()),
-                               int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(bv))
+
+                def fq(v):
+                    return f"{v:.1f}" if abs(v) < 100 else f"{v:.0f}"
+
+                if self._mode == "delta":
+                    # ---- MODE NET-DELTA (spec) : cellule verte si delta>0, rouge
+                    # sinon, intensité du fond ∝ volume ABSOLU traité au niveau ----
+                    d = bv - sv
+                    inten = int(28 + 165 * min(1.0, tot / mx))
+                    p.fillRect(r, QtGui.QColor(24, 130, 80, inten) if d >= 0
+                               else QtGui.QColor(180, 44, 44, inten))
+                    if lvl == poc:
+                        p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                        p.drawRect(r)
+                    if r.height() >= 12 and r.width() >= 42:
+                        p.setPen(QtGui.QColor("#e8eef5"))
+                        p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignCenter), f"{d:+.1f}" if abs(d) < 100 else f"{d:+.0f}")
+                    if lvl == max_lvl and abs(bv - sv) >= 0.3:
+                        # BULLE sur l'imbalance max de la bougie (le "669" de l'exemple)
+                        bub = r.adjusted(-3, -3, 3, 3)
+                        p.setPen(QtGui.QPen(GREEN if bv >= sv else RED, 2.0))
+                        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                        p.drawEllipse(bub)
+                else:
+                    # ---- MODE VENTE × ACHAT (bid×ask, style ATAS) ----
+                    p.fillRect(r, QtGui.QColor(28, 36, 48, 200))
+                    cx = r.center().x(); half = r.width() / 2 - 2
+                    imb_b = bv >= 3 * sv and bv >= 0.4
+                    imb_s = sv >= 3 * bv and sv >= 0.4
+                    ws = half * min(1.0, sv / mx); wb = half * min(1.0, bv / mx)
+                    p.fillRect(QtCore.QRectF(cx - ws, r.top() + 1, ws, r.height() - 2),
+                               QtGui.QColor(230, 60, 60, 235 if imb_s else 130))
+                    p.fillRect(QtCore.QRectF(cx, r.top() + 1, wb, r.height() - 2),
+                               QtGui.QColor(40, 200, 115, 235 if imb_b else 130))
+                    if lvl == poc:
+                        p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                        p.drawRect(r)
+                    if r.height() >= 13 and r.width() >= 64:
+                        p.setPen(QtGui.QColor("#ffffff") if imb_s else RED)
+                        p.drawText(QtCore.QRectF(r.left() + 2, r.top(), r.width()/2 - 5, r.height()),
+                                   int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(sv))
+                        p.setPen(DIMC)
+                        p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter), "×")
+                        p.setPen(QtGui.QColor("#ffffff") if imb_b else GREEN)
+                        p.drawText(QtCore.QRectF(cx + 5, r.top(), r.width()/2 - 7, r.height()),
+                                   int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(bv))
 
             # bougie OHLC par-dessus (fine, semi-transparente)
             up = bar["c"] >= bar["o"]
@@ -3928,6 +3999,26 @@ class FootprintItem(pg.GraphicsObject):
             p.drawText(fr2, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
                        f"{vol:.0f}")
             p.setFont(font)
+
+        # ---- MARQUEURS DE SIGNAUX (divergence delta / absorption) ----
+        CENTER = int(QtCore.Qt.AlignmentFlag.AlignCenter)
+        for sig in self._signals:
+            i = sig.get("i", -1)
+            if not (0 <= i < len(bars)):
+                continue
+            bar = bars[i]; t = sig.get("t")
+            if t == "div_bear":
+                p.setPen(QtGui.QColor("#ff9f1a"))
+                p.drawText(mrect(i - 0.5, bar["h"] + 0.5 * bucket, 1.0, bucket), CENTER, "▼DIV")
+            elif t == "div_bull":
+                p.setPen(QtGui.QColor("#ff9f1a"))
+                p.drawText(mrect(i - 0.5, bar["l"] - 5.0 * bucket, 1.0, bucket), CENTER, "▲DIV")
+            elif t == "abs_bull":
+                p.setPen(QtGui.QColor("#00e5ff"))
+                p.drawText(mrect(i - 0.5, bar["l"] - 5.0 * bucket, 1.0, bucket), CENTER, "ABS")
+            elif t == "abs_bear":
+                p.setPen(QtGui.QColor("#00e5ff"))
+                p.drawText(mrect(i - 0.5, bar["h"] + 0.5 * bucket, 1.0, bucket), CENTER, "ABS")
         p.restore()
 
 
