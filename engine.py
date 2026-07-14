@@ -10,6 +10,7 @@ is likely a single-venue spoof.
 """
 
 import asyncio
+import json
 import os
 import time
 import threading
@@ -115,6 +116,14 @@ class OrderFlowEngine:
             self._log("MURS", f"Historique des murs rechargé : {n} niveaux repris.")
         self._last_wall_save = time.time()
 
+        # persistance des LIQUIDATIONS : Bybit ne redonne PAS l'historique, donc on
+        # garde le nôtre sur disque -> vrai 24/7 côté serveur (survit aux redémarrages
+        # de l'auto-update) ET plus de reset à zéro en local à chaque relance.
+        self._liq_state_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "liq_state.json")
+        self._load_liqs()
+        self._last_liq_save = time.time()
+
         # FOOTPRINT : backfill des trades d'AVANT le lancement (Binance aggTrades)
         # pour que le footprint ne reparte plus de zéro à chaque relance.
         self._launch_ts = time.time()
@@ -189,6 +198,33 @@ class OrderFlowEngine:
             self._log("FOOTPRINT", f"Historique footprint pré-chargé : "
                       f"{len(out):,} trades (~{(out[-1][0]-out[0][0])/60:.0f} min).")
 
+    def _load_liqs(self):
+        """Recharge les liquidations enregistrées (max 48h) pour ne pas repartir de
+        zéro. Sert au serveur 24/7 (survit aux redémarrages) et à l'appli locale."""
+        try:
+            with open(self._liq_state_path, "r") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        cutoff = time.time() - 48 * 3600
+        kept = [tuple(x) for x in data
+                if isinstance(x, (list, tuple)) and len(x) == 4 and x[0] >= cutoff]
+        with self.agg._lock:
+            self.agg.liqs.extend(kept)
+        if kept:
+            self._log("LIQUIDATIONS",
+                      f"Historique liquidations rechargé : {len(kept)} évènements.")
+
+    def _save_liqs(self):
+        """Écrit les liquidations sur disque (appelé périodiquement + à l'arrêt)."""
+        try:
+            with self.agg._lock:
+                data = list(self.agg.liqs)
+            with open(self._liq_state_path, "w") as f:
+                json.dump(data, f)
+        except (OSError, ValueError, TypeError):
+            pass
+
     def _fp_fetch_range(self, start_ms, end_ms):
         """Re-télécharge les aggTrades Binance sur [start_ms, end_ms] pour reboucher
         un trou (coupure de connexion). Renvoie une liste (ts, price, qty, is_sell)."""
@@ -241,11 +277,12 @@ class OrderFlowEngine:
 
     def stop(self):
         self._running = False
-        # dernière sauvegarde de l'historique des murs avant de couper
+        # dernière sauvegarde de l'historique des murs + liquidations avant de couper
         try:
             self.wall_history.save(self._wall_state_path)
         except Exception:
             pass
+        self._save_liqs()
         for c in self._connectors:
             c.stop()
         if self._loop:
@@ -347,6 +384,10 @@ class OrderFlowEngine:
             if time.time() - self._last_wall_save > 20:
                 self.wall_history.save(self._wall_state_path)
                 self._last_wall_save = time.time()
+            # sauvegarde des liquidations toutes les 20s (24/7 sans perte)
+            if time.time() - self._last_liq_save > 20:
+                self._save_liqs()
+                self._last_liq_save = time.time()
 
     def _bucketize(self, price):
         return round(price / self.bucket) * self.bucket

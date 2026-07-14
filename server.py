@@ -204,6 +204,7 @@ class AlertServer:
                 {"command": "status", "description": "État du serveur + tes niveaux surveillés"},
                 {"command": "niveaux", "description": "Définir tes niveaux (ex: 61000, 63000)"},
                 {"command": "proximite", "description": "Distance d'alerte en $ (ex: 100)"},
+                {"command": "liquidations", "description": "Zones de liquidation enregistrées 24/7 (aimants)"},
                 {"command": "update", "description": "Mettre à jour le serveur maintenant"},
                 {"command": "aide", "description": "Liste des commandes"},
             ])
@@ -232,12 +233,15 @@ class AlertServer:
             return self._cmd_proximite(q)
         if low in ("/update", "/maj"):
             return self._cmd_update()
+        if low.startswith("/liq"):
+            return self._cmd_liquidations()
         if low in ("/aide", "/help", "/start", "aide"):
             return ("🤖 Copilote Order Flow — commandes :\n"
                     "/live — TOUTES les données en direct (prix, CVD, murs, VWAP, POC…)\n"
                     "/status — état du serveur + tes niveaux\n"
                     "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
                     "/proximite 100 — distance d'alerte (à combien de $ ça te prévient)\n"
+                    "/liquidations — zones de liquidation enregistrées 24/7 (aimants)\n"
                     "/update — récupérer la dernière version du code\n"
                     "\n…ou pose une question libre (« je short ici ? ») → le copilote analyse.")
         # --- sinon : question libre au copilote ---
@@ -256,6 +260,31 @@ class AlertServer:
                 f"Niveaux surveillés : {lv}\n"
                 f"Fenêtre : {self.cfg.get('start_h')}h–{self.cfg.get('end_h')}h\n"
                 f"Alertes : {'ON' if self.cfg.get('enabled') else 'OFF'}")
+
+    def _cmd_liquidations(self):
+        """Zones de liquidation RÉELLES enregistrées en continu (24/7, persistées sur
+        disque -> survivent aux redémarrages) + niveaux-aimants estimés par levier."""
+        s = self.state or {}
+        mid = s.get("mid")
+        clusters = self.engine.get_liq_clusters(window_s=24 * 3600, bucket=50.0)
+        lines = ["💥 LIQUIDATIONS (enregistrées 24/7)"]
+        if mid:
+            lines.append(f"Prix : {mid:,.0f}$")
+        if clusters:
+            lines.append("\nZones où le plus de positions ont sauté :")
+            for c in clusters[:8]:
+                dom = "LONGS" if c["long"] >= c["short"] else "SHORTS"
+                dist = f" ({c['price'] - mid:+.0f}$)" if mid else ""
+                lines.append(f"  {c['price']:,.0f}${dist} · {c['total']/1e6:.1f}M$ ({dom})")
+        else:
+            lines.append("\n(aucune liquidation enregistrée pour l'instant)")
+        levs = self.engine.leverage_liq_levels(mid) if mid else []
+        if levs:
+            lines.append("\nAimants estimés par levier :")
+            for lv in levs:
+                lines.append(f"  {lv['lev']}x → longs {lv['long_liq']:,.0f}$ · "
+                             f"shorts {lv['short_liq']:,.0f}$")
+        return "\n".join(lines)
 
     def _cmd_niveaux(self, q):
         import re

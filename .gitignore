@@ -3,6 +3,7 @@ claude_key.txt
 alerts_config.json
 ai_budget.json
 wall_state.json
+liq_state.json
 mes_niveaux.txt
 server.log
 
