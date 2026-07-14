@@ -2835,9 +2835,10 @@ class Cockpit(QtWidgets.QMainWindow):
             "FOOTPRINT : chaque bougie éclatée prix par prix. Mode <b>Δ net</b> : chaque "
             "cellule = delta net (achat−vente) au niveau — <span style='color:#3ddc84;'>vert "
             "= achat net</span>, <span style='color:#ff5c5c;'>rouge = vente nette</span>, "
-            "intensité du fond ∝ volume traité, cercle = plus forte imbalance de la bougie. "
+            "barre horizontale derrière le nombre ∝ volume traité au niveau. "
             "Mode <b>Vente × Achat</b> : les deux volumes bruts. Cadre jaune = POC. "
-            "Marqueurs auto : ▼▲DIV = divergence delta · ABS = absorption. "
+            "Les <b>BULLES</b> = GROS ORDRES individuels au marché (vert=achat, rouge=vente, "
+            "taille = volume). Marqueurs : ▼▲DIV = divergence delta · ABS = absorption. "
             "En bas : DELTA CUMULÉ. Historique pré-chargé au lancement.")
         intro.setWordWrap(True); intro.setTextFormat(QtCore.Qt.TextFormat.RichText)
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
@@ -2861,6 +2862,10 @@ class Cockpit(QtWidgets.QMainWindow):
         ctrl.addWidget(lbl2)
         self.fp_bucket = combo(["10 $", "20 $", "25 $", "50 $"], "20 $")
         ctrl.addWidget(self.fp_bucket)
+        lbl3 = QtWidgets.QLabel("  BULLE ≥"); lbl3.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        ctrl.addWidget(lbl3)
+        self.fp_big = combo(["0.5 BTC", "1 BTC", "1.5 BTC", "3 BTC", "5 BTC"], "1.5 BTC")
+        ctrl.addWidget(self.fp_big)
         self.fp_lock = QtWidgets.QCheckBox("🔒 figer l'échelle (zoom manuel)")
         self.fp_lock.setStyleSheet(f"QCheckBox{{color:{TXT};font-size:12px;font-weight:600;}}")
         ctrl.addWidget(self.fp_lock)
@@ -2914,7 +2919,8 @@ class Cockpit(QtWidgets.QMainWindow):
         import time as _t
         tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
         bucket = float(self.fp_bucket.currentText().replace("$", "").strip())
-        fp = self.engine.get_footprint(tf, bucket, n_bars=26)
+        big_btc = float(self.fp_big.currentText().replace("BTC", "").strip())
+        fp = self.engine.get_footprint(tf, bucket, n_bars=26, big_btc=big_btc)
         bars = fp["bars"]
         if not bars:
             self.fp_status.setText("· en attente de trades live…")
@@ -3924,10 +3930,6 @@ class FootprintItem(pg.GraphicsObject):
                 continue
             mx = max(c[0] + c[1] for c in cells.values()) or 1.0
             poc = max(cells, key=lambda k: cells[k][0] + cells[k][1])
-            # ligne (niveau) avec le plus fort |delta| de la bougie -> bulle
-            max_lvl = max(cells, key=lambda k: abs(cells[k][0] - cells[k][1])) \
-                if self._mode == "delta" and cells else None
-
             for lvl, (bv, sv) in cells.items():
                 r = mrect(i - 0.44, lvl - bucket / 2, 0.88, bucket)
                 tot = bv + sv
@@ -3936,24 +3938,22 @@ class FootprintItem(pg.GraphicsObject):
                     return f"{v:.1f}" if abs(v) < 100 else f"{v:.0f}"
 
                 if self._mode == "delta":
-                    # ---- MODE NET-DELTA (spec) : cellule verte si delta>0, rouge
-                    # sinon, intensité du fond ∝ volume ABSOLU traité au niveau ----
+                    # ---- MODE NET-DELTA (comme la vraie image) : fond sombre, BARRE
+                    # DE VOLUME horizontale derrière le nombre (longueur ∝ volume),
+                    # teintée vert si delta>0 / rouge sinon, puis le NOMBRE = delta net ----
                     d = bv - sv
-                    inten = int(28 + 165 * min(1.0, tot / mx))
-                    p.fillRect(r, QtGui.QColor(24, 130, 80, inten) if d >= 0
-                               else QtGui.QColor(180, 44, 44, inten))
+                    p.fillRect(r, QtGui.QColor(30, 38, 50, 235))
+                    wbar = (r.width() - 2) * min(1.0, tot / mx)
+                    barcol = QtGui.QColor(34, 150, 90, 235) if d >= 0 else QtGui.QColor(185, 48, 48, 235)
+                    p.fillRect(QtCore.QRectF(r.left() + 1, r.top() + 1, wbar, r.height() - 2), barcol)
                     if lvl == poc:
                         p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
                         p.drawRect(r)
-                    if r.height() >= 12 and r.width() >= 42:
-                        p.setPen(QtGui.QColor("#e8eef5"))
-                        p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignCenter), f"{d:+.1f}" if abs(d) < 100 else f"{d:+.0f}")
-                    if lvl == max_lvl and abs(bv - sv) >= 0.3:
-                        # BULLE sur l'imbalance max de la bougie (le "669" de l'exemple)
-                        bub = r.adjusted(-3, -3, 3, 3)
-                        p.setPen(QtGui.QPen(GREEN if bv >= sv else RED, 2.0))
-                        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                        p.drawEllipse(bub)
+                    if r.height() >= 11 and r.width() >= 40:
+                        p.setPen(QtGui.QColor("#eef2f7"))
+                        p.drawText(r.adjusted(4, 0, -4, 0),
+                                   int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                                   f"{d:+.0f}" if abs(d) >= 10 else f"{d:+.1f}")
                 else:
                     # ---- MODE VENTE × ACHAT (bid×ask, style ATAS) ----
                     p.fillRect(r, QtGui.QColor(28, 36, 48, 200))
@@ -3999,6 +3999,20 @@ class FootprintItem(pg.GraphicsObject):
             p.drawText(fr2, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
                        f"{vol:.0f}")
             p.setFont(font)
+
+            # ---- BULLES : GROS ORDRES INDIVIDUELS au marché (le "669" de l'exemple) ----
+            bigs = sorted(bar.get("big", []), key=lambda x: x[1])   # petits d'abord (gros au-dessus)
+            for (bp2, bq, bs) in bigs[-4:]:
+                pt = tr.map(QtCore.QPointF(float(i), float(bp2)))
+                rad = 9.0 + min(17.0, (bq ** 0.5) * 3.0)
+                col = QtGui.QColor(231, 76, 60) if bs else QtGui.QColor(46, 204, 113)
+                p.setBrush(col); p.setPen(QtGui.QPen(QtGui.QColor("#0d1117"), 1.2))
+                p.drawEllipse(pt, rad, rad)
+                p.setPen(QtGui.QColor("#ffffff")); p.setFont(small)
+                p.drawText(QtCore.QRectF(pt.x() - rad, pt.y() - rad, 2 * rad, 2 * rad),
+                           int(QtCore.Qt.AlignmentFlag.AlignCenter),
+                           f"{bq:.0f}" if bq >= 10 else f"{bq:.1f}")
+                p.setFont(font)
 
         # ---- MARQUEURS DE SIGNAUX (divergence delta / absorption) ----
         CENTER = int(QtCore.Qt.AlignmentFlag.AlignCenter)

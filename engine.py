@@ -1104,7 +1104,7 @@ class OrderFlowEngine:
                 deduped.append(c)
         return list(reversed(deduped))[:20]
 
-    def get_footprint(self, tf_s=60, bucket=20.0, n_bars=26):
+    def get_footprint(self, tf_s=60, bucket=20.0, n_bars=26, big_btc=1.5):
         """FOOTPRINT institutionnel : pour chaque bougie de tf_s secondes, le volume
         VENTE × ACHAT exécuté à CHAQUE niveau de prix (cellules de bucket $), plus
         OHLC, delta et totaux. Cache incrémental : on ne traite que les NOUVEAUX
@@ -1116,7 +1116,7 @@ class OrderFlowEngine:
             bar = bars.get(b0)
             if bar is None:
                 bar = bars[b0] = {"t0": b0, "o": price, "h": price, "l": price,
-                                  "c": price, "cells": {}, "buy": 0.0, "sell": 0.0}
+                                  "c": price, "cells": {}, "buy": 0.0, "sell": 0.0, "big": []}
             lvl = round(price / bucket) * bucket
             cell = bar["cells"].setdefault(lvl, [0.0, 0.0])
             if is_sell:
@@ -1126,6 +1126,12 @@ class OrderFlowEngine:
             if price > bar["h"]: bar["h"] = price
             if price < bar["l"]: bar["l"] = price
             bar["c"] = price
+            # GROS ORDRE INDIVIDUEL (une seule exécution) -> bulle sur le graphique
+            if qty >= big_btc:
+                bar["big"].append((price, qty, is_sell))
+                if len(bar["big"]) > 8:
+                    bar["big"].sort(key=lambda x: x[1], reverse=True)
+                    bar["big"] = bar["big"][:6]
 
         if getattr(self, "_fp_key", None) != key:
             self._fp_key = key
