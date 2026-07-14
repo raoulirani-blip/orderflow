@@ -466,6 +466,32 @@ class OrderFlowEngine:
                         "Souvent un plancher (retournement haussier possible).")
         return None
 
+    def _wall_absorbed(self, walls):
+        """Volume AGRESSIF exécuté à ±tol de chaque mur depuis le dernier tick.
+        Un mur qui absorbe bien plus que sa taille affichée sans céder = ICEBERG
+        (ordre caché qui se recharge) — l'opposé d'un spoof (retiré sans être touché)."""
+        last = getattr(self, "_absorb_last_ts", None)
+        now = time.time()
+        self._absorb_last_ts = now
+        if last is None or not walls:
+            return {}
+        recent = []
+        with self.agg._lock:
+            for t in reversed(self.agg.trades_hist):
+                if t[0] <= last:
+                    break
+                recent.append(t)
+        if not recent:
+            return {}
+        out = {}
+        for w in walls:
+            p = w["price"]
+            tol = max(1.0, p * 0.0002)
+            v = sum(q for ts, pr, q, s in recent if abs(pr - p) <= tol)
+            if v > 0:
+                out[round(p, 1)] = out.get(round(p, 1), 0.0) + v
+        return out
+
     def _compute_walls(self, mid, bids, asks):
         lo = mid * (1 - self.depth_pct * 5)
         hi = mid * (1 + self.depth_pct * 5)
@@ -698,7 +724,7 @@ class OrderFlowEngine:
         absorption = self._detect_absorption(mid)
         walls, med = self._compute_walls(mid, bids, asks)
         self._update_heatmap(mid, bids, asks)
-        self.wall_history.update(walls, mid)
+        self.wall_history.update(walls, mid, self._wall_absorbed(walls))
 
         bid_keys = sorted([p for p in bids if p <= mid], reverse=True)[:16]
         ask_keys = sorted([p for p in asks if p >= mid])[:16]

@@ -27,7 +27,7 @@ from collections import deque
 class WallRecord:
     __slots__ = ("price", "side", "first_seen", "last_seen", "max_qty",
                  "max_ratio", "venues_max", "tests", "_was_near", "broken",
-                 "pulled", "last_price_rel")
+                 "pulled", "last_price_rel", "absorbed")
 
     def __init__(self, price, side, qty, ratio, venues, now):
         self.price = price
@@ -42,6 +42,9 @@ class WallRecord:
         self.broken = False         # price traded through it
         self.pulled = False         # disappeared fast while price not near (spoof)
         self.last_price_rel = None
+        # volume AGRESSIF exécuté À ce niveau tant que le mur vivait. Beaucoup de
+        # volume absorbé SANS que le mur cède = ICEBERG (ordre caché qui se recharge).
+        self.absorbed = 0.0
 
     def update(self, qty, ratio, venues, mid, now):
         self.last_seen = now
@@ -73,9 +76,11 @@ class WallHistory:
         self.active = {}                         # (price, side) -> WallRecord
         self.closed = deque(maxlen=5000)         # finished WallRecords (ts_closed, rec)
 
-    def update(self, walls, mid):
-        """Feed the current detected walls (list of dicts) + mid price."""
+    def update(self, walls, mid, absorbed=None):
+        """Feed the current detected walls (list of dicts) + mid price. `absorbed` =
+        {prix_arrondi: volume agressif exécuté à ce niveau depuis le dernier tick}."""
         now = time.time()
+        absorbed = absorbed or {}
         seen_keys = set()
         for w in walls:
             key = (round(w["price"], 1), w["side"])
@@ -87,6 +92,7 @@ class WallHistory:
                 self.active[key] = rec
             else:
                 rec.update(w["qty"], w["ratio"], w["venues"], mid, now)
+            rec.absorbed += absorbed.get(key[0], 0.0)
 
         # INVALIDATION explicite : le prix a-t-il traversé un mur de +break_margin$ ?
         # (on vérifie TOUS les murs suivis, même ceux qui viennent de disparaître)
@@ -177,6 +183,7 @@ class WallHistory:
             m.broken = latest.broken
             m.pulled = latest.pulled
             m.last_price_rel = latest.last_price_rel
+            m.absorbed = sum(r.absorbed for r in group)
             return m
 
         recs = [_merge(g) for g in groups.values()]
@@ -194,8 +201,20 @@ class WallHistory:
         held = [r for r in recs if not r.broken and not r.pulled]
         now = time.time()
 
+        # ICEBERG : le mur a absorbé bien plus de volume agressif que sa taille
+        # affichée SANS céder = ordre caché qui se recharge. À l'OPPOSÉ du spoof
+        # (retiré sans être touché, ~0 volume absorbé) — jamais confondus.
+        ICE_MULT = 1.5      # a absorbé ≥ 1.5× sa taille visible max
+        ICE_MIN = 5.0       # et au moins 5 BTC (sinon ce n'est pas significatif)
+
+        def is_iceberg(r):
+            return (not r.broken and r.absorbed >= ICE_MIN
+                    and r.absorbed >= ICE_MULT * max(r.max_qty, 1e-9))
+
         def classify(r):
-            """Statut clair d'un mur : ACTIF / VALIDÉ / INVALIDÉ / SPOOF / DISPARU."""
+            """Statut clair d'un mur : ACTIF / VALIDÉ / INVALIDÉ / SPOOF / DISPARU.
+            (Le fait d'être un ICEBERG est une étiquette À PART, pas un statut : un
+            iceberg peut être encore actif — on ne veut pas le sortir des ACTIFS.)"""
             if r.broken:
                 return "invalide"       # le prix a TRAVERSÉ (prioritaire sur tout)
             if r.last_seen >= now - 1.6:
@@ -220,12 +239,15 @@ class WallHistory:
                 "dist": (mid - r.price) if mid else None,
                 "active": r.last_seen >= now - 1.6,
                 "status": classify(r),
+                "iceberg": is_iceberg(r),
+                "absorbed": round(r.absorbed, 1),
             }
 
         packed = [pack(r) for r in ranked]
         cats = {"actif": [], "valide": [], "invalide": [], "spoof": [], "disparu": []}
         for w in packed:
             cats[w["status"]].append(w)
+        icebergs = [w for w in packed if w["iceberg"]]
 
         return {
             "ready": True, "minutes": minutes,
@@ -240,6 +262,8 @@ class WallHistory:
             "categories": cats,
             "n_actif": len(cats["actif"]), "n_valide": len(cats["valide"]),
             "n_invalide": len(cats["invalide"]), "n_spoof2": len(cats["spoof"]),
+            # ICEBERGS : étiquette à part (peuvent être actifs), jamais des spoofs
+            "icebergs": icebergs, "n_iceberg": len(icebergs),
         }
 
     # -----------------------------------------------------------------------
@@ -248,7 +272,7 @@ class WallHistory:
     # logiciel a observé est sauvegardé sur disque et rechargé au lancement.
     # -----------------------------------------------------------------------
     _FIELDS = ("price", "side", "first_seen", "last_seen", "max_qty", "max_ratio",
-               "venues_max", "tests", "broken", "pulled", "last_price_rel")
+               "venues_max", "tests", "broken", "pulled", "last_price_rel", "absorbed")
 
     def _rec_to_dict(self, r):
         return {f: getattr(r, f) for f in self._FIELDS}
@@ -261,6 +285,7 @@ class WallHistory:
         r.broken = d.get("broken", False)
         r.pulled = d.get("pulled", False)
         r.last_price_rel = d.get("last_price_rel")
+        r.absorbed = d.get("absorbed", 0.0)
         return r
 
     def save(self, path):

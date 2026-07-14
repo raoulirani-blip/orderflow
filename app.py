@@ -886,7 +886,8 @@ class Cockpit(QtWidgets.QMainWindow):
             w["header"].setText(
                 f"🧱 Fenêtre {m} min   ·   {rep['n_total']} murs vus "
                 f"({rep['n_buy']} support / {rep['n_sell']} résistance)   ·   "
-                f"{rep['n_spoof']} spoof   ·   maj {_t.strftime('%H:%M:%S')}")
+                f"{rep['n_spoof']} spoof   ·    🧊 {rep.get('n_iceberg', 0)} iceberg   ·   "
+                f"maj {_t.strftime('%H:%M:%S')}")
 
             lg = rep["longest"]
             status = ("🟢 toujours actif" if lg["active"] else
@@ -908,6 +909,9 @@ class Cockpit(QtWidgets.QMainWindow):
                 parts.append(f"<span style='color:{cc};font-weight:800;'>"
                              f"{lbl.split(' ',1)[0]} {len(cats.get(key,[]))}</span>"
                              f"<span style='color:{DIM};font-size:10px;'> {lbl.split(' ',1)[1]}</span>")
+            # ICEBERGS : étiquette à part (absorption réelle, opposé du spoof)
+            parts.append(f"<span style='color:{ACCENT};font-weight:800;'>🧊 {rep.get('n_iceberg', 0)}</span>"
+                         f"<span style='color:{DIM};font-size:10px;'> ICEBERGS (absorbent+se rechargent)</span>")
             w["catbar"].setText("   ".join(parts))
 
             def cell(txt, col=TXT):
@@ -1055,7 +1059,11 @@ class Cockpit(QtWidgets.QMainWindow):
                     att_txt, att_col = "—", DIM
                 lb, ls = flow.get(round(px, 1), (0.0, 0.0))
                 net = lb - ls
-                if lb + ls <= 0:
+                if wl.get("iceberg"):
+                    # a absorbé bien plus que sa taille sans céder = ordre caché
+                    lect = f"🧊 ICEBERG — a absorbé {wl.get('absorbed', 0):.0f} BTC sans céder"
+                    lcol = ACCENT
+                elif lb + ls <= 0:
                     lect, lcol = "pas de volume échangé ici", DIM
                 elif lb > ls * 1.3:
                     lect, lcol = "ACCUMULATION (achat net)", GREEN
