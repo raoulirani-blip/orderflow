@@ -121,6 +121,11 @@ class OrderFlowEngine:
         self._fp_bf = []            # trades pré-lancement (ts, price, qty, is_sell)
         self._fp_bf_done = False
         self._fp_bf_applied = set()
+        # AUTO-RÉPARATION : rebouche les trous (coupures de connexion) depuis Binance
+        self._fp_heal = []          # trades récupérés en fond pour combler un trou
+        self._fp_heal_dirty = False
+        self._fp_heal_lock = threading.Lock()
+        self._fp_heal_q = deque()   # plages (start_ms, end_ms) à re-télécharger
 
         self.heatmap_rows = heatmap_rows
         self.heatmap_cols = heatmap_cols
@@ -139,6 +144,8 @@ class OrderFlowEngine:
         self._thread.start()
         # backfill footprint en fond (trades réels d'avant le lancement)
         threading.Thread(target=self._fp_backfill_run, daemon=True).start()
+        # healer footprint : rebouche les trous de connexion en continu
+        threading.Thread(target=self._fp_heal_loop, daemon=True).start()
 
     def _fp_backfill_run(self, minutes=240):
         """Récupère ~4H de trades RÉELS (Binance aggTrades) d'avant le lancement,
@@ -181,6 +188,56 @@ class OrderFlowEngine:
         if out:
             self._log("FOOTPRINT", f"Historique footprint pré-chargé : "
                       f"{len(out):,} trades (~{(out[-1][0]-out[0][0])/60:.0f} min).")
+
+    def _fp_fetch_range(self, start_ms, end_ms):
+        """Re-télécharge les aggTrades Binance sur [start_ms, end_ms] pour reboucher
+        un trou (coupure de connexion). Renvoie une liste (ts, price, qty, is_sell)."""
+        import requests
+        url = "https://fapi.binance.com/fapi/v1/aggTrades"
+        out, from_id = [], None
+        for _ in range(600):
+            try:
+                params = {"symbol": self.symbol.upper(), "limit": 1000}
+                if from_id is None:
+                    params["startTime"] = start_ms
+                    params["endTime"] = min(start_ms + 55 * 60 * 1000, end_ms)
+                else:
+                    params["fromId"] = from_id
+                r = requests.get(url, params=params, timeout=10).json()
+            except Exception:
+                time.sleep(1.5); continue
+            if not isinstance(r, list) or not r:
+                break
+            stop = False
+            for a in r:
+                if a["T"] > end_ms:
+                    stop = True; break
+                out.append((a["T"] / 1000.0, float(a["p"]), float(a["q"]), bool(a["m"])))
+            if stop or r[-1]["T"] >= end_ms or len(r) < 1000:
+                break
+            from_id = r[-1]["a"] + 1
+            time.sleep(0.4)
+        return out
+
+    def _fp_heal_loop(self):
+        """En fond : dépile les trous détectés et les rebouche depuis Binance. Comme
+        Binance garde tout l'historique public, un trou (PC éteint, VPN coupé) est
+        toujours récupérable -> le footprint se répare seul à la reconnexion."""
+        while self._running:
+            time.sleep(1)
+            try:
+                if not self._fp_heal_q:
+                    continue
+                start_ms, end_ms = self._fp_heal_q.popleft()
+                trades = self._fp_fetch_range(start_ms, end_ms)
+                if trades:
+                    with self._fp_heal_lock:
+                        self._fp_heal.extend(trades)
+                        self._fp_heal_dirty = True
+                    self._log("FOOTPRINT", f"Trou rebouché : {len(trades):,} trades "
+                              f"récupérés (~{(end_ms - start_ms) / 60000:.0f} min).")
+            except Exception:
+                time.sleep(2)
 
     def stop(self):
         self._running = False
@@ -1152,6 +1209,15 @@ class OrderFlowEngine:
                     acc(self._fp_bars, ts, price, qty, is_sell)
             self._fp_last_ts = self._launch_ts   # le live reprend après le lancement
 
+        # fusionne les trous déjà rebouchés en fond (trades récupérés depuis Binance)
+        if self._fp_heal_dirty:
+            with self._fp_heal_lock:
+                healed = self._fp_heal
+                self._fp_heal = []
+                self._fp_heal_dirty = False
+            for ts, price, qty, is_sell in healed:
+                acc(self._fp_bars, ts, price, qty, is_sell)
+
         with self.agg._lock:
             new = []
             for t in reversed(self.agg.trades_hist):
@@ -1159,6 +1225,14 @@ class OrderFlowEngine:
                     break
                 new.append(t)
         new.reverse()
+        # DÉTECTION DE TROU : si le live reprend après un long silence (coupure de
+        # connexion), on enfile la plage manquante pour la reboucher depuis Binance.
+        if (new and key in self._fp_bf_applied
+                and (new[0][0] - self._fp_last_ts) > max(90.0, 1.5 * tf_s)):
+            g0, g1 = self._fp_last_ts, new[0][0]
+            if g1 - g0 > 6 * 3600:                 # cap 6h (fenêtre affichée = 4h)
+                g0 = g1 - 6 * 3600
+            self._fp_heal_q.append((int(g0 * 1000), int(g1 * 1000)))
         for ts, price, qty, is_sell in new:
             acc(self._fp_bars, ts, price, qty, is_sell)
         if new:
