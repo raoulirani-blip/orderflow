@@ -2851,7 +2851,7 @@ class Cockpit(QtWidgets.QMainWindow):
             return c
         lbl0 = QtWidgets.QLabel("MODE :"); lbl0.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl0)
-        self.fp_mode = combo(["Δ net (delta)", "Vente × Achat"], "Δ net (delta)")
+        self.fp_mode = combo(["Vente × Achat", "Δ net (delta)"], "Vente × Achat")
         ctrl.addWidget(self.fp_mode)
         lbl = QtWidgets.QLabel("  BOUGIE :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl)
@@ -2964,16 +2964,16 @@ class Cockpit(QtWidgets.QMainWindow):
                                     else "aucun (divergences delta et absorptions s'affichent ici)"))
 
         mode = "delta" if self.fp_mode.currentText().startswith("Δ") else "split"
-        y_lo = min(b["l"] for b in bars) - 4.6 * bucket
-        y_hi = max(b["h"] for b in bars) + 1.4 * bucket
+        y_lo = min(b["l"] for b in bars) - 3.0 * bucket
+        y_hi = max(b["h"] for b in bars) + 4.4 * bucket
         self.fp_item.setFPData(bars, bucket, y_lo, y_hi, mode=mode, signals=signals)
         if not self.fp_lock.isChecked():
-            # vue initiale : les ~26 dernières bougies (cellules lisibles), on peut
-            # glisser à gauche pour parcourir tout l'historique 4H
-            x0 = max(-0.6, n - 26)
-            vis = [b for b in bars[int(max(0, x0)):]]
-            vy_lo = min(b["l"] for b in vis) - 4.6 * bucket
-            vy_hi = max(b["h"] for b in vis) + 1.4 * bucket
+            # vue initiale : ~13 dernières bougies (cellules larges et lisibles comme
+            # sur MotiveWave), on peut glisser à gauche pour parcourir tout l'historique 4H
+            x0 = max(-0.6, n - 13)
+            vis = bars[int(max(0, x0)):]
+            vy_lo = min(b["l"] for b in vis) - 3.0 * bucket
+            vy_hi = max(b["h"] for b in vis) + 4.4 * bucket
             self.fp_plot.setYRange(vy_lo, vy_hi, padding=0)
             self.fp_plot.setXRange(x0, n + 0.4, padding=0)
         # axe temps (HH:MM sous chaque 2e bougie)
@@ -3981,14 +3981,21 @@ class FootprintItem(pg.GraphicsObject):
         p.save()
         p.resetTransform()
         font = QtGui.QFont("Consolas", 8)
-        small = QtGui.QFont("Consolas", 8)
+        font.setStyleHint(QtGui.QFont.StyleHint.Monospace)   # fallback monospace auto
+        hfont = QtGui.QFont("Consolas", 8, QtGui.QFont.Weight.Bold)
+        hfont.setStyleHint(QtGui.QFont.StyleHint.Monospace)
         p.setFont(font)
+        AL = QtCore.Qt.AlignmentFlag
+        NB = QtCore.Qt.BrushStyle.NoBrush
 
         def mrect(x, y, w, h):
             return tr.mapRect(QtCore.QRectF(x, y, w, h)).normalized()
 
-        GREEN = QtGui.QColor("#3ddc84"); RED = QtGui.QColor("#ff5c5c")
-        DIMC = QtGui.QColor("#8a94a6"); POCC = QtGui.QColor("#f5c518")
+        GREENc = QtGui.QColor("#2ecc71"); REDc = QtGui.QColor("#e74c3c")
+        POCC = QtGui.QColor("#f5c518"); WHITE = QtGui.QColor("#eef2f7")
+
+        def fq(v):
+            return f"{v:.0f}" if abs(v) >= 100 else (f"{v:.1f}" if abs(v) >= 1 else f"{v:.2f}")
 
         for i, bar in enumerate(bars):
             cells = bar["cells"]
@@ -3996,85 +4003,70 @@ class FootprintItem(pg.GraphicsObject):
                 continue
             mx = max(c[0] + c[1] for c in cells.values()) or 1.0
             poc = max(cells, key=lambda k: cells[k][0] + cells[k][1])
+            up = bar["c"] >= bar["o"]
+            # LA BOUGIE EST LE FOOTPRINT : colonne teintée bleu (haussière) / rouge (baissière)
+            tint = (36, 74, 118) if up else (120, 46, 56)
+            barcol = (58, 120, 195) if up else (205, 76, 88)
+
             for lvl, (bv, sv) in cells.items():
-                r = mrect(i - 0.44, lvl - bucket / 2, 0.88, bucket)
+                r = mrect(i - 0.47, lvl - bucket / 2, 0.94, bucket)
                 tot = bv + sv
+                d = bv - sv
+                # fond de cellule teinté direction, intensité ∝ volume au niveau
+                p.fillRect(r, QtGui.QColor(tint[0], tint[1], tint[2],
+                                           int(45 + 120 * min(1.0, tot / mx))))
+                # barre de volume horizontale derrière (même teinte, plus vive)
+                wbar = (r.width() - 2) * min(1.0, tot / mx)
+                p.fillRect(QtCore.QRectF(r.left() + 1, r.top() + 1, wbar, r.height() - 2),
+                           QtGui.QColor(barcol[0], barcol[1], barcol[2], 140))
+                # imbalance 3:1 -> cellule encadrée (vert=achat / rouge=vente)
+                imb_b = bv >= 3 * sv and bv >= 0.4
+                imb_s = sv >= 3 * bv and sv >= 0.4
+                if imb_b or imb_s:
+                    p.setPen(QtGui.QPen(GREENc if imb_b else REDc, 1.6)); p.setBrush(NB)
+                    p.drawRect(r.adjusted(1, 1, -1, -1))
+                if lvl == poc:
+                    p.setPen(QtGui.QPen(POCC, 1.5)); p.setBrush(NB)
+                    p.drawRect(r)
+                if r.height() >= 11 and r.width() >= 60:
+                    if self._mode == "delta":
+                        p.setPen(WHITE)
+                        p.drawText(r.adjusted(6, 0, -6, 0), int(AL.AlignLeft | AL.AlignVCenter),
+                                   f"{d:+.0f}")
+                    else:
+                        p.setPen(WHITE)
+                        p.drawText(r.adjusted(5, 0, -32, 0), int(AL.AlignLeft | AL.AlignVCenter),
+                                   f"{fq(sv)} × {fq(bv)}")
+                        p.setPen(GREENc if d >= 0 else REDc)
+                        p.drawText(r.adjusted(0, 0, -5, 0), int(AL.AlignRight | AL.AlignVCenter),
+                                   f"{d:+.0f}")
 
-                def fq(v):
-                    return f"{v:.1f}" if abs(v) < 100 else f"{v:.0f}"
-
-                if self._mode == "delta":
-                    # ---- MODE NET-DELTA (comme la vraie image) : fond sombre, BARRE
-                    # DE VOLUME horizontale derrière le nombre (longueur ∝ volume),
-                    # teintée vert si delta>0 / rouge sinon, puis le NOMBRE = delta net ----
-                    d = bv - sv
-                    p.fillRect(r, QtGui.QColor(30, 38, 50, 235))
-                    wbar = (r.width() - 2) * min(1.0, tot / mx)
-                    barcol = QtGui.QColor(34, 150, 90, 235) if d >= 0 else QtGui.QColor(185, 48, 48, 235)
-                    p.fillRect(QtCore.QRectF(r.left() + 1, r.top() + 1, wbar, r.height() - 2), barcol)
-                    if lvl == poc:
-                        p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                        p.drawRect(r)
-                    if r.height() >= 11 and r.width() >= 40:
-                        p.setPen(QtGui.QColor("#eef2f7"))
-                        p.drawText(r.adjusted(4, 0, -4, 0),
-                                   int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter),
-                                   f"{d:+.0f}" if abs(d) >= 10 else f"{d:+.1f}")
-                else:
-                    # ---- MODE VENTE × ACHAT (bid×ask, style ATAS) ----
-                    p.fillRect(r, QtGui.QColor(28, 36, 48, 200))
-                    cx = r.center().x(); half = r.width() / 2 - 2
-                    imb_b = bv >= 3 * sv and bv >= 0.4
-                    imb_s = sv >= 3 * bv and sv >= 0.4
-                    ws = half * min(1.0, sv / mx); wb = half * min(1.0, bv / mx)
-                    p.fillRect(QtCore.QRectF(cx - ws, r.top() + 1, ws, r.height() - 2),
-                               QtGui.QColor(230, 60, 60, 235 if imb_s else 130))
-                    p.fillRect(QtCore.QRectF(cx, r.top() + 1, wb, r.height() - 2),
-                               QtGui.QColor(40, 200, 115, 235 if imb_b else 130))
-                    if lvl == poc:
-                        p.setPen(QtGui.QPen(POCC, 1.4)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                        p.drawRect(r)
-                    if r.height() >= 13 and r.width() >= 64:
-                        p.setPen(QtGui.QColor("#ffffff") if imb_s else RED)
-                        p.drawText(QtCore.QRectF(r.left() + 2, r.top(), r.width()/2 - 5, r.height()),
-                                   int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(sv))
-                        p.setPen(DIMC)
-                        p.drawText(r, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter), "×")
-                        p.setPen(QtGui.QColor("#ffffff") if imb_b else GREEN)
-                        p.drawText(QtCore.QRectF(cx + 5, r.top(), r.width()/2 - 7, r.height()),
-                                   int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(bv))
-
-            # delta + volume sous la barre
-            delta = bar["buy"] - bar["sell"]; vol = bar["buy"] + bar["sell"]
-            fr = mrect(i - 0.5, bar["l"] - 2.6 * bucket, 1.0, 1.1 * bucket)
-            p.setPen(GREEN if delta >= 0 else RED)
-            p.drawText(fr, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
-                       f"Δ{delta:+.1f}")
-            fr2 = mrect(i - 0.5, bar["l"] - 3.7 * bucket, 1.0, 1.0 * bucket)
-            p.setPen(DIMC); p.setFont(small)
-            p.drawText(fr2, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
-                       f"{vol:.0f}")
+            # ENTÊTE de colonne (au-dessus) : volume total + delta de la bougie
+            vol = bar["buy"] + bar["sell"]; delta = bar["buy"] - bar["sell"]
+            p.setFont(hfont)
+            p.setPen(QtGui.QColor("#c9d3df"))
+            p.drawText(mrect(i - 0.5, bar["h"] + 1.6 * bucket, 1.0, 1.3 * bucket),
+                       int(AL.AlignCenter), f"{vol:.0f}")
+            p.setPen(GREENc if delta >= 0 else REDc)
+            p.drawText(mrect(i - 0.5, bar["h"] + 0.35 * bucket, 1.0, 1.2 * bucket),
+                       int(AL.AlignCenter), f"{delta:+.0f}")
             p.setFont(font)
 
         # ---- MARQUEURS DE SIGNAUX (divergence delta / absorption) ----
-        CENTER = int(QtCore.Qt.AlignmentFlag.AlignCenter)
+        CENTER = int(AL.AlignCenter)
         for sig in self._signals:
             i = sig.get("i", -1)
             if not (0 <= i < len(bars)):
                 continue
             bar = bars[i]; t = sig.get("t")
-            if t == "div_bear":
-                p.setPen(QtGui.QColor("#ff9f1a"))
-                p.drawText(mrect(i - 0.5, bar["h"] + 0.5 * bucket, 1.0, bucket), CENTER, "▼DIV")
-            elif t == "div_bull":
-                p.setPen(QtGui.QColor("#ff9f1a"))
-                p.drawText(mrect(i - 0.5, bar["l"] - 5.0 * bucket, 1.0, bucket), CENTER, "▲DIV")
-            elif t == "abs_bull":
-                p.setPen(QtGui.QColor("#00e5ff"))
-                p.drawText(mrect(i - 0.5, bar["l"] - 5.0 * bucket, 1.0, bucket), CENTER, "ABS")
-            elif t == "abs_bear":
-                p.setPen(QtGui.QColor("#00e5ff"))
-                p.drawText(mrect(i - 0.5, bar["h"] + 0.5 * bucket, 1.0, bucket), CENTER, "ABS")
+            if t in ("div_bear", "abs_bear"):
+                p.setPen(QtGui.QColor("#ff9f1a") if t == "div_bear" else QtGui.QColor("#00e5ff"))
+                p.drawText(mrect(i - 0.5, bar["h"] + 3.0 * bucket, 1.0, bucket), CENTER,
+                           "DIV" if t == "div_bear" else "ABS")
+            else:
+                p.setPen(QtGui.QColor("#ff9f1a") if t == "div_bull" else QtGui.QColor("#00e5ff"))
+                p.drawText(mrect(i - 0.5, bar["l"] - 1.7 * bucket, 1.0, bucket), CENTER,
+                           "DIV" if t == "div_bull" else "ABS")
         p.restore()
 
 
