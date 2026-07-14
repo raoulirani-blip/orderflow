@@ -2886,6 +2886,15 @@ class Cockpit(QtWidgets.QMainWindow):
         self.fp_plot.getAxis("bottom").setTextPen(pg.mkPen("#8a94a6"))
         self.fp_item = FootprintItem()
         self.fp_plot.addItem(self.fp_item)
+        # LIGNE DE PRIX EN DIRECT (suit le prix exact, avec la valeur affichée)
+        self.fp_price_line = pg.InfiniteLine(
+            angle=0, movable=False,
+            pen=pg.mkPen("#00e5ff", width=1.4, style=QtCore.Qt.PenStyle.DashLine),
+            label="{value:,.0f}",
+            labelOpts={"color": "#0d1117", "fill": (0, 229, 255, 230),
+                       "position": 0.015, "movable": False})
+        self.fp_price_line.setZValue(50)
+        self.fp_plot.addItem(self.fp_price_line)
         self.fp_cum = glw.addPlot(row=1, col=0)
         self.fp_cum.setMaximumHeight(150)
         self.fp_cum.showGrid(x=False, y=True, alpha=0.10)
@@ -2962,6 +2971,10 @@ class Cockpit(QtWidgets.QMainWindow):
                   for s in signals[-5:]]
         self.fp_signals_lbl.setText("Signaux : " + ("  ·  ".join(recent) if recent
                                     else "aucun (divergences delta et absorptions s'affichent ici)"))
+
+        # ligne de prix EN DIRECT (prix live du carnet, sinon dernière clôture)
+        live = (self._last_state or {}).get("mid") or bars[-1]["c"]
+        self.fp_price_line.setValue(live)
 
         mode = "delta" if self.fp_mode.currentText().startswith("Δ") else "split"
         y_lo = min(b["l"] for b in bars) - 3.0 * bucket
@@ -4051,6 +4064,12 @@ class FootprintItem(pg.GraphicsObject):
             p.drawText(mrect(i - 0.5, bar["h"] + 0.35 * bucket, 1.0, 1.2 * bucket),
                        int(AL.AlignCenter), f"{delta:+.0f}")
             p.setFont(font)
+
+        # ---- LIGNE DE PROGRESSION DU PRIX (relie les clôtures des colonnes) ----
+        pts = [tr.map(QtCore.QPointF(float(i), float(b["c"]))) for i, b in enumerate(bars)]
+        p.setPen(QtGui.QPen(QtGui.QColor(230, 236, 245, 170), 1.4))
+        for a, b2 in zip(pts, pts[1:]):
+            p.drawLine(a, b2)
 
         # ---- MARQUEURS DE SIGNAUX (divergence delta / absorption) ----
         CENTER = int(AL.AlignCenter)
