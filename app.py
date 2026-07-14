@@ -333,7 +333,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self.WALL_DISTS = {"± 100 $ (proche)": 100, "± 250 $": 250,
                            "± 500 $": 500, "± 1000 $": 1000, "Tout": None}
         self.wall_dist_combo.addItems(list(self.WALL_DISTS.keys()))
-        self.wall_dist_combo.setCurrentText("± 250 $")
+        self.wall_dist_combo.setCurrentText("Tout")
         self.wall_dist_combo.setStyleSheet(
             f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
             f"color:{TXT};padding:6px 12px;font-weight:700;}}")
@@ -357,6 +357,7 @@ class Cockpit(QtWidgets.QMainWindow):
             "Tests ↓": "tests",
         }
         self.wall_sort_combo.addItems(list(self.WALL_SORTS.keys()))
+        self.wall_sort_combo.setCurrentText("Taille (BTC) ↓")
         self.wall_sort_combo.setStyleSheet(
             f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
             f"color:{TXT};padding:6px 12px;font-weight:700;}}")
