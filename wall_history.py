@@ -155,6 +155,32 @@ class WallHistory:
         if not recs:
             return {"ready": False, "minutes": minutes}
 
+        # DÉ-DUPLICATION par niveau : un même (prix, côté) peut avoir plusieurs "vies"
+        # (mur qui clignote : apparaît → disparaît >1.5s → réapparaît = nouveau record).
+        # Sans ça, le même niveau s'affiche en 2-3 lignes identiques. On fusionne en UN
+        # record : pic max, somme des tests, durée totale, ÉTAT LE PLUS RÉCENT.
+        groups = {}
+        for r in recs:
+            groups.setdefault((round(r.price, 1), r.side), []).append(r)
+
+        def _merge(group):
+            if len(group) == 1:
+                return group[0]
+            latest = max(group, key=lambda r: r.last_seen)
+            m = WallRecord(latest.price, latest.side, 0.0, 0.0, 1,
+                           min(r.first_seen for r in group))
+            m.max_qty = max(r.max_qty for r in group)
+            m.max_ratio = max(r.max_ratio for r in group)
+            m.venues_max = max(r.venues_max for r in group)
+            m.tests = sum(r.tests for r in group)
+            m.last_seen = latest.last_seen        # état courant = vie la plus récente
+            m.broken = latest.broken
+            m.pulled = latest.pulled
+            m.last_price_rel = latest.last_price_rel
+            return m
+
+        recs = [_merge(g) for g in groups.values()]
+
         # importance score: size * venues * sqrt(lifespan)
         def score(r):
             return r.max_qty * max(1, r.venues_max) * (max(1.0, r.lifespan) ** 0.5)
