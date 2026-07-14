@@ -2832,14 +2832,13 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
 
         intro = QtWidgets.QLabel(
-            "FOOTPRINT : chaque bougie éclatée prix par prix. Mode <b>Δ net</b> : chaque "
-            "cellule = delta net (achat−vente) au niveau — <span style='color:#3ddc84;'>vert "
-            "= achat net</span>, <span style='color:#ff5c5c;'>rouge = vente nette</span>, "
-            "barre horizontale derrière le nombre ∝ volume traité au niveau. "
-            "Mode <b>Vente × Achat</b> : les deux volumes bruts. Cadre jaune = POC. "
-            "Les <b>BULLES</b> = GROS ORDRES individuels au marché (vert=achat, rouge=vente, "
-            "taille = volume). Marqueurs : ▼▲DIV = divergence delta · ABS = absorption. "
-            "En bas : DELTA CUMULÉ. Historique pré-chargé au lancement.")
+            "FOOTPRINT (cellules pures, ~4H). Mode <b>Δ net</b> : chaque cellule = delta net "
+            "(achat−vente) au niveau — <span style='color:#3ddc84;'>vert = achat net</span>, "
+            "<span style='color:#ff5c5c;'>rouge = vente nette</span>, barre horizontale ∝ "
+            "volume traité au niveau. Mode <b>Vente × Achat</b> : les deux volumes bruts. "
+            "Cadre jaune = POC. Sous chaque colonne : Δ + volume. En bas : DELTA CUMULÉ. "
+            "Marqueurs : ▼▲DIV = divergence · ABS = absorption. Dossier complet à droite. "
+            "Glisse horizontalement pour remonter les 4H. Historique pré-chargé au lancement.")
         intro.setWordWrap(True); intro.setTextFormat(QtCore.Qt.TextFormat.RichText)
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
@@ -2862,10 +2861,6 @@ class Cockpit(QtWidgets.QMainWindow):
         ctrl.addWidget(lbl2)
         self.fp_bucket = combo(["10 $", "20 $", "25 $", "50 $"], "20 $")
         ctrl.addWidget(self.fp_bucket)
-        lbl3 = QtWidgets.QLabel("  BULLE ≥"); lbl3.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
-        ctrl.addWidget(lbl3)
-        self.fp_big = combo(["0.5 BTC", "1 BTC", "1.5 BTC", "3 BTC", "5 BTC"], "1.5 BTC")
-        ctrl.addWidget(self.fp_big)
         self.fp_lock = QtWidgets.QCheckBox("🔒 figer l'échelle (zoom manuel)")
         self.fp_lock.setStyleSheet(f"QCheckBox{{color:{TXT};font-size:12px;font-weight:600;}}")
         ctrl.addWidget(self.fp_lock)
@@ -2904,7 +2899,16 @@ class Cockpit(QtWidgets.QMainWindow):
         self.fp_cum.addLine(y=0, pen=pg.mkPen("#555", width=0.7))
         glw.ci.layout.setRowStretchFactor(0, 4)
         glw.ci.layout.setRowStretchFactor(1, 1)
-        outer.addWidget(glw, 1)
+
+        # chart à gauche + DOSSIER de stats détaillé à droite
+        body = QtWidgets.QHBoxLayout(); body.setSpacing(10)
+        body.addWidget(glw, 1)
+        self.fp_dossier = QtWidgets.QTextEdit(); self.fp_dossier.setReadOnly(True)
+        self.fp_dossier.setFixedWidth(300)
+        self.fp_dossier.setStyleSheet(f"QTextEdit{{background:{PANEL};border:1px solid {BORDER};"
+                                      f"border-radius:10px;color:{TXT};font-size:12px;padding:12px;}}")
+        body.addWidget(self.fp_dossier)
+        outer.addLayout(body, 1)
         self._fp_page = page
 
         self._fp_timer = QtCore.QTimer(self)
@@ -2919,15 +2923,16 @@ class Cockpit(QtWidgets.QMainWindow):
         import time as _t
         tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
         bucket = float(self.fp_bucket.currentText().replace("$", "").strip())
-        big_btc = float(self.fp_big.currentText().replace("BTC", "").strip())
-        fp = self.engine.get_footprint(tf, bucket, n_bars=26, big_btc=big_btc)
+        n_bars = min(80, max(20, int(4 * 3600 / tf)))      # ~4H (cap 80 col pour la fluidité)
+        fp = self.engine.get_footprint(tf, bucket, n_bars=n_bars)
         bars = fp["bars"]
         if not bars:
-            self.fp_status.setText("· en attente de trades live…")
+            self.fp_status.setText("· pré-chargement des trades (4H) en cours…")
             return
         n = len(bars)
+        span_min = (bars[-1]["t0"] - bars[0]["t0"]) / 60 + tf / 60
         tot_trades = sum(b["buy"] + b["sell"] for b in bars)
-        self.fp_status.setText(f"· {n} bougies · {tot_trades:,.0f} BTC traités")
+        self.fp_status.setText(f"· {n} bougies · ~{span_min:.0f} min · {tot_trades:,.0f} BTC traités")
 
         # ---- SIGNAUX : divergence delta + absorption (couche spec) ----
         import time as _tt
@@ -2959,12 +2964,18 @@ class Cockpit(QtWidgets.QMainWindow):
                                     else "aucun (divergences delta et absorptions s'affichent ici)"))
 
         mode = "delta" if self.fp_mode.currentText().startswith("Δ") else "split"
-        y_lo = min(b["l"] for b in bars) - 6.2 * bucket
-        y_hi = max(b["h"] for b in bars) + 1.8 * bucket
+        y_lo = min(b["l"] for b in bars) - 4.6 * bucket
+        y_hi = max(b["h"] for b in bars) + 1.4 * bucket
         self.fp_item.setFPData(bars, bucket, y_lo, y_hi, mode=mode, signals=signals)
         if not self.fp_lock.isChecked():
-            self.fp_plot.setYRange(y_lo, y_hi, padding=0)
-            self.fp_plot.setXRange(-0.6, n + 0.4, padding=0)
+            # vue initiale : les ~26 dernières bougies (cellules lisibles), on peut
+            # glisser à gauche pour parcourir tout l'historique 4H
+            x0 = max(-0.6, n - 26)
+            vis = [b for b in bars[int(max(0, x0)):]]
+            vy_lo = min(b["l"] for b in vis) - 4.6 * bucket
+            vy_hi = max(b["h"] for b in vis) + 1.4 * bucket
+            self.fp_plot.setYRange(vy_lo, vy_hi, padding=0)
+            self.fp_plot.setXRange(x0, n + 0.4, padding=0)
         # axe temps (HH:MM sous chaque 2e bougie)
         ticks = [(i, _t.strftime("%H:%M", _t.localtime(b["t0"])))
                  for i, b in enumerate(bars) if i % 2 == 0]
@@ -2975,6 +2986,61 @@ class Cockpit(QtWidgets.QMainWindow):
         for b in bars:
             c += b["buy"] - b["sell"]; cum.append(c)
         self.fp_cum_curve.setData(list(range(n)), cum)
+
+        # ---- DOSSIER COMPLET (profil agrégé sur toute la période) ----
+        from collections import defaultdict
+        prof = defaultdict(lambda: [0.0, 0.0])
+        for b in bars:
+            for lvl, (bv, sv) in b["cells"].items():
+                prof[lvl][0] += bv; prof[lvl][1] += sv
+        tot_buy = sum(v[0] for v in prof.values())
+        tot_sell = sum(v[1] for v in prof.values())
+        tot_vol = tot_buy + tot_sell or 1.0
+        poc = max(prof, key=lambda k: prof[k][0] + prof[k][1]) if prof else 0
+        # value area 70% autour du POC
+        levels_sorted = sorted(prof)
+        vah = val = poc
+        if poc:
+            idx = levels_sorted.index(poc)
+            va = prof[poc][0] + prof[poc][1]; lo_i = hi_i = idx
+            target = tot_vol * 0.70
+            while va < target and (lo_i > 0 or hi_i < len(levels_sorted) - 1):
+                la = (prof[levels_sorted[lo_i-1]][0]+prof[levels_sorted[lo_i-1]][1]) if lo_i > 0 else -1
+                ha = (prof[levels_sorted[hi_i+1]][0]+prof[levels_sorted[hi_i+1]][1]) if hi_i < len(levels_sorted)-1 else -1
+                if la >= ha and lo_i > 0:
+                    lo_i -= 1; va += la
+                elif hi_i < len(levels_sorted)-1:
+                    hi_i += 1; va += ha
+                else:
+                    break
+            val = levels_sorted[lo_i]; vah = levels_sorted[hi_i]
+        top_vol = sorted(prof.items(), key=lambda kv: kv[1][0]+kv[1][1], reverse=True)[:5]
+        top_buy = sorted(prof.items(), key=lambda kv: kv[1][0]-kv[1][1], reverse=True)[:3]
+        top_sell = sorted(prof.items(), key=lambda kv: kv[1][1]-kv[1][0], reverse=True)[:3]
+        net = tot_buy - tot_sell
+        H = [f"<div style='color:{DIM};font-weight:800;letter-spacing:1px;'>DOSSIER FOOTPRINT</div>",
+             f"<div style='color:{DIM};font-size:11px;margin-bottom:8px;'>{n} bougies · "
+             f"~{span_min:.0f} min · cellule {bucket:.0f}$</div>",
+             "<b style='color:#aab4c0;'>VOLUME</b>",
+             f"Total : <b>{tot_vol:,.0f}</b> BTC (~{tot_vol*bars[-1]['c']/1e6:,.0f} M$)",
+             f"Achat : <span style='color:{GREEN};'>{tot_buy:,.0f}</span> · "
+             f"Vente : <span style='color:{RED};'>{tot_sell:,.0f}</span>",
+             f"Delta net : <b style='color:{GREEN if net>=0 else RED};'>{net:+,.0f}</b> BTC · "
+             f"CVD : <b style='color:{GREEN if cum[-1]>=0 else RED};'>{cum[-1]:+,.0f}</b>",
+             f"<br><b style='color:#aab4c0;'>NIVEAUX CLÉS</b>",
+             f"POC : <b style='color:#f5c518;'>{poc:,.0f}</b>",
+             f"Value Area 70% : <b>{val:,.0f} → {vah:,.0f}</b>",
+             f"<br><b style='color:#aab4c0;'>TOP VOLUME</b>"]
+        for lvl, (bv, sv) in top_vol:
+            H.append(f"{lvl:,.0f} — {bv+sv:,.0f} BTC (Δ{bv-sv:+.0f})")
+        H.append(f"<br><b style='color:{GREEN};'>PLUS FORT ACHAT NET</b>")
+        for lvl, (bv, sv) in top_buy:
+            H.append(f"{lvl:,.0f} — <span style='color:{GREEN};'>+{bv-sv:,.0f}</span> BTC")
+        H.append(f"<b style='color:{RED};'>PLUS FORTE VENTE NETTE</b>")
+        for lvl, (bv, sv) in top_sell:
+            H.append(f"{lvl:,.0f} — <span style='color:{RED};'>{bv-sv:,.0f}</span> BTC")
+        H.append(f"<br><b style='color:#aab4c0;'>SIGNAUX</b> : {len(signals)} détectés")
+        self._hset(self.fp_dossier, "<br>".join(H))
 
     # ===========================================================
     # PAGE Z-SCORES — EXTRÊMES STATISTIQUES MULTI-ÉCHELLES
@@ -3978,16 +4044,6 @@ class FootprintItem(pg.GraphicsObject):
                         p.drawText(QtCore.QRectF(cx + 5, r.top(), r.width()/2 - 7, r.height()),
                                    int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), fq(bv))
 
-            # bougie OHLC par-dessus (fine, semi-transparente)
-            up = bar["c"] >= bar["o"]
-            cc = QtGui.QColor("#3ddc84") if up else QtGui.QColor("#ff5c5c")
-            cc.setAlpha(200)
-            wick = mrect(i - 0.015, bar["l"], 0.03, bar["h"] - bar["l"])
-            p.fillRect(wick, cc)
-            body_top = max(bar["o"], bar["c"]); body_h = abs(bar["c"] - bar["o"]) or bucket * 0.06
-            body = mrect(i - 0.09, body_top - body_h, 0.18, body_h)
-            p.fillRect(body, cc)
-
             # delta + volume sous la barre
             delta = bar["buy"] - bar["sell"]; vol = bar["buy"] + bar["sell"]
             fr = mrect(i - 0.5, bar["l"] - 2.6 * bucket, 1.0, 1.1 * bucket)
@@ -3999,20 +4055,6 @@ class FootprintItem(pg.GraphicsObject):
             p.drawText(fr2, int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
                        f"{vol:.0f}")
             p.setFont(font)
-
-            # ---- BULLES : GROS ORDRES INDIVIDUELS au marché (le "669" de l'exemple) ----
-            bigs = sorted(bar.get("big", []), key=lambda x: x[1])   # petits d'abord (gros au-dessus)
-            for (bp2, bq, bs) in bigs[-4:]:
-                pt = tr.map(QtCore.QPointF(float(i), float(bp2)))
-                rad = 9.0 + min(17.0, (bq ** 0.5) * 3.0)
-                col = QtGui.QColor(231, 76, 60) if bs else QtGui.QColor(46, 204, 113)
-                p.setBrush(col); p.setPen(QtGui.QPen(QtGui.QColor("#0d1117"), 1.2))
-                p.drawEllipse(pt, rad, rad)
-                p.setPen(QtGui.QColor("#ffffff")); p.setFont(small)
-                p.drawText(QtCore.QRectF(pt.x() - rad, pt.y() - rad, 2 * rad, 2 * rad),
-                           int(QtCore.Qt.AlignmentFlag.AlignCenter),
-                           f"{bq:.0f}" if bq >= 10 else f"{bq:.1f}")
-                p.setFont(font)
 
         # ---- MARQUEURS DE SIGNAUX (divergence delta / absorption) ----
         CENTER = int(QtCore.Qt.AlignmentFlag.AlignCenter)
