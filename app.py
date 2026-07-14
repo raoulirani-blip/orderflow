@@ -208,7 +208,8 @@ class Cockpit(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_walls_page(), "  🧱  MURS  ")
 
         # --- Page 4: VWAP + CVD multi-fenêtres ---
-        self.tabs.addTab(self._build_vwap_page(), "  📈  VWAP & CVD  ")
+        self._vwap_page = self._build_vwap_page()
+        self.tabs.addTab(self._vwap_page, "  📈  VWAP & CVD  ")
 
         # --- Page 5: Flux institutionnels ---
         self.tabs.addTab(self._build_instit_page(), "  🏦  INSTITUTIONNELS  ")
@@ -231,9 +232,6 @@ class Cockpit(QtWidgets.QMainWindow):
         # --- Options Deribit détaillées (graphiques) ---
         self.tabs.addTab(self._build_options_page(), "  🎰  OPTIONS  ")
 
-        # --- Macro intraday (graphiques) ---
-        self.tabs.addTab(self._build_macro_page(), "  🌍  MACRO  ")
-
         # --- Calculateur de position (money management) ---
         self.tabs.addTab(self._build_calc_page(), "  🧮  CALCULATEUR  ")
 
@@ -251,6 +249,29 @@ class Cockpit(QtWidgets.QMainWindow):
 
         # --- Page 10: Exécution des setups ---
         self.tabs.insertTab(1, self._build_exec_page(), "  🎯  EXÉCUTION  ")
+
+        # --- Coin haut-droit : PRIX BTC live + accès VWAP en 1 clic (sur TOUTES les pages) ---
+        corner = QtWidgets.QWidget()
+        crow = QtWidgets.QHBoxLayout(corner)
+        crow.setContentsMargins(0, 0, 10, 0); crow.setSpacing(8)
+        self.corner_price = QtWidgets.QLabel("₿ —")
+        self.corner_price.setStyleSheet(
+            f"color:{ACCENT};font-size:15px;font-weight:800;background:{PANEL};"
+            f"border:1px solid {BORDER};border-radius:8px;padding:4px 12px;")
+        crow.addWidget(self.corner_price)
+        vwap_btn = QtWidgets.QPushButton("📈 VWAP")
+        vwap_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        vwap_btn.setToolTip("Aller à la page VWAP & CVD (raccourci : Ctrl+V)")
+        vwap_btn.setStyleSheet(
+            f"QPushButton{{color:{TXT};font-size:13px;font-weight:800;background:{PANEL};"
+            f"border:1px solid {BORDER};border-radius:8px;padding:4px 12px;}}"
+            f"QPushButton:hover{{border:1px solid {ACCENT};color:{ACCENT};}}")
+        vwap_btn.clicked.connect(lambda: self.tabs.setCurrentWidget(self._vwap_page))
+        crow.addWidget(vwap_btn)
+        self.tabs.setCornerWidget(corner, QtCore.Qt.Corner.TopRightCorner)
+        # raccourci clavier Ctrl+V -> page VWAP
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+V"), self,
+                        activated=lambda: self.tabs.setCurrentWidget(self._vwap_page))
 
     def _build_bilans_section(self):
         """Section BILANS PÉRIODIQUES (5/15/30/60 min) — autrefois dans la page
@@ -600,6 +621,10 @@ class Cockpit(QtWidgets.QMainWindow):
     def on_state(self,s):
         self._last_state = s
         self.analyzer.feed(s)
+        # prix BTC live dans le coin (visible sur toutes les pages)
+        _m = s.get("mid")
+        if _m and hasattr(self, "corner_price"):
+            self.corner_price.setText(f"₿ {_m:,.1f} $")
         if "error" in s:
             self.bias_label.setText("ERREUR"); self.bias_sub.setText(s["error"][:120]); return
         # venue pills
