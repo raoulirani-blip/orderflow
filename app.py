@@ -34,6 +34,7 @@ except ImportError:
 
 class Bridge(QtCore.QObject):
     state = QtCore.pyqtSignal(dict)
+    journal_closed = QtCore.pyqtSignal()   # rattrapage hors-ligne -> refresh UI
 
 
 TRADINGVIEW_HTML = """<!DOCTYPE html>
@@ -86,6 +87,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self.setStyleSheet(f"QMainWindow{{background:{BG};}}")
         self.bridge = Bridge()
         self.bridge.state.connect(self.on_state)
+        self.bridge.journal_closed.connect(self._journal_refresh)
         self.engine = OrderFlowEngine(on_update=lambda s: self.bridge.state.emit(s))
         self.analyzer = SlowAnalyzer(verdict_window_s=10.0, zone_persist_s=3.0)
         self._last_state = None
@@ -2350,6 +2352,8 @@ class Cockpit(QtWidgets.QMainWindow):
 
         self._journal = self._journal_load()
         self._journal_refresh()
+        # rattrape les clôtures TP/SL survenues pendant que le PC était éteint
+        self._journal_backfill_closures()
         return page
 
     def _journal_add(self):
@@ -2421,6 +2425,88 @@ class Cockpit(QtWidgets.QMainWindow):
             self._journal_save()
             if hasattr(self, "j_table"):
                 self._journal_refresh()
+
+    def _journal_backfill_closures(self):
+        """Au lancement : rattrape les trades ouverts qui ont touché leur TP/SL PENDANT
+        que le PC était éteint, en relisant le vrai historique de prix (klines Binance).
+        -> les trades se clôturent correctement même si le PC était éteint."""
+        j = getattr(self, "_journal", None)
+        if not j:
+            return
+        if not any(t.get("exit") is None and t.get("date") and
+                   (t.get("tp") is not None or t.get("sl") is not None) for t in j):
+            return
+        import threading
+        threading.Thread(target=self._journal_backfill_run, daemon=True).start()
+
+    def _journal_backfill_run(self):
+        import datetime
+        changed = False
+        for rec in list(self._journal):
+            if rec.get("exit") is not None:
+                continue
+            tp = rec.get("tp"); sl = rec.get("sl")
+            if tp is None and sl is None:
+                continue
+            try:
+                open_dt = datetime.datetime.strptime(rec["date"][:19], "%Y-%m-%d %H:%M:%S")
+                open_ts = open_dt.timestamp()
+            except (ValueError, KeyError, TypeError):
+                continue
+            hit = self._scan_klines_for_hit(open_ts, rec.get("side"), tp, sl)
+            if hit:
+                kind, price, when = hit
+                rec["exit"] = price
+                rec["note"] = f"{kind} atteint hors-ligne · {when}"
+                changed = True
+        if changed:
+            self._journal_save()
+            self.bridge.journal_closed.emit()   # refresh sur le thread UI
+
+    def _scan_klines_for_hit(self, open_ts, side, tp, sl):
+        """Parcourt les klines Binance depuis l'ouverture : renvoie (kind, prix, heure)
+        du PREMIER niveau touché (TP ou SL), sinon None. En cas d'ambiguïté dans une
+        même bougie (TP et SL touchés), on suppose le SL d'abord (prudent)."""
+        import time as _t, datetime, requests
+        now = _t.time()
+        dur_min = max(1.0, (now - open_ts) / 60.0)
+        for interval, mins in (("1m", 1), ("5m", 5), ("15m", 15), ("1h", 60), ("4h", 240)):
+            if dur_min / mins <= 1400:
+                break
+        url = "https://fapi.binance.com/fapi/v1/klines"
+        out = []
+        start_ms = int(open_ts * 1000)
+        try:
+            for _ in range(6):
+                r = requests.get(url, params={"symbol": self.engine.symbol.upper(),
+                                              "interval": interval, "startTime": start_ms,
+                                              "limit": 1500}, timeout=10).json()
+                if not isinstance(r, list) or not r:
+                    break
+                out.extend(r)
+                if len(r) < 1500:
+                    break
+                start_ms = r[-1][0] + 1
+        except Exception:
+            return None
+        is_long = side == "Long"
+        for k in out:
+            try:
+                t0 = k[0] / 1000.0; high = float(k[2]); low = float(k[3])
+            except (IndexError, ValueError, TypeError):
+                continue
+            if is_long:
+                sl_hit = sl is not None and low <= sl
+                tp_hit = tp is not None and high >= tp
+            else:
+                sl_hit = sl is not None and high >= sl
+                tp_hit = tp is not None and low <= tp
+            if sl_hit or tp_hit:
+                when = datetime.datetime.fromtimestamp(t0).strftime("%d %b %H:%M")
+                if sl_hit:                       # prudent : SL prioritaire si les deux
+                    return ("SL", sl, when)
+                return ("TP", tp, when)
+        return None
 
     def _journal_close(self, kind):
         """Clôture le trade sélectionné : au TP -> sortie = TP (WIN), au SL -> sortie
