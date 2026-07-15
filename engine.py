@@ -1182,9 +1182,82 @@ class OrderFlowEngine:
             "top10":     [(p, d) for p, d in top10],
             # histogramme complet (prix -> volume) pour le graphique
             "levels":    [(p, vol[p]["total"]) for p in prices_sorted],
+            # cellules achat/vente par niveau (profil footprint)
+            "cells":     {p: vol[p] for p in prices_sorted},
+            "hi": prices_sorted[-1], "lo": prices_sorted[0],
             "bucket":    bucket,
             "n_levels":  len(vol),
             "window_min": window_s / 60,
+        }
+
+    def get_profile_klines(self, interval="15m", limit=288, target_levels=110):
+        """Volume profile FOOTPRINT sur une GRANDE fenêtre (jours) construit depuis
+        les klines Binance (volume total + volume ACHETEUR agresseur, index 9). Le
+        volume de chaque bougie est réparti sur les niveaux de prix qu'elle a traversés
+        [low, high], avec le split achat/vente -> profil achat×vente par niveau. Appel
+        RÉSEAU (à lancer en tâche de fond côté UI pour éviter toute latence)."""
+        from connectors import fetch_klines
+        try:
+            kl = fetch_klines(self.symbol, interval=interval, limit=limit)
+        except Exception:
+            return None
+        if not isinstance(kl, list) or not kl:
+            return None
+        cand = []
+        lo_all = hi_all = None
+        for k in kl:
+            try:
+                h = float(k[2]); l = float(k[3]); v = float(k[5]); bv = float(k[9])
+            except (IndexError, ValueError, TypeError):
+                continue
+            if v <= 0 or h < l:
+                continue
+            sv = max(0.0, v - bv)
+            cand.append((l, h, bv, sv))
+            lo_all = l if lo_all is None else min(lo_all, l)
+            hi_all = h if hi_all is None else max(hi_all, h)
+        if not cand or lo_all is None or hi_all <= lo_all:
+            return None
+        bucket = max(10.0, round((hi_all - lo_all) / target_levels / 10.0) * 10.0)
+        vol = defaultdict(lambda: {"total": 0.0, "buy": 0.0, "sell": 0.0})
+        total_vol = 0.0
+        for l, h, bv, sv in cand:
+            lo_b = round(l / bucket) * bucket
+            hi_b = round(h / bucket) * bucket
+            nb = int(round((hi_b - lo_b) / bucket)) + 1
+            if nb < 1:
+                nb = 1
+            fb, fs = bv / nb, sv / nb
+            for i in range(nb):
+                cell = vol[lo_b + i * bucket]
+                cell["buy"] += fb; cell["sell"] += fs; cell["total"] += fb + fs
+            total_vol += bv + sv
+        if not vol or total_vol == 0:
+            return None
+        poc = max(vol, key=lambda p: vol[p]["total"])
+        prices_sorted = sorted(vol.keys())
+        poc_idx = prices_sorted.index(poc)
+        va_vol = vol[poc]["total"]; target = total_vol * 0.70
+        lo_idx = hi_idx = poc_idx
+        while va_vol < target:
+            lo_add = vol[prices_sorted[lo_idx - 1]]["total"] if lo_idx > 0 else 0
+            hi_add = vol[prices_sorted[hi_idx + 1]]["total"] if hi_idx < len(prices_sorted) - 1 else 0
+            if lo_add == 0 and hi_add == 0:
+                break
+            if lo_add >= hi_add and lo_idx > 0:
+                lo_idx -= 1; va_vol += lo_add
+            elif hi_idx < len(prices_sorted) - 1:
+                hi_idx += 1; va_vol += hi_add
+            else:
+                break
+        top = sorted(vol.items(), key=lambda kv: kv[1]["total"], reverse=True)
+        return {
+            "levels": dict(vol), "poc": poc,
+            "vah": prices_sorted[hi_idx], "val": prices_sorted[lo_idx],
+            "va_pct": va_vol / total_vol, "total_vol": total_vol,
+            "hi": hi_all, "lo": lo_all, "bucket": bucket,
+            "interval": interval, "n_candles": len(cand),
+            "top10": top[:30],
         }
 
     def get_cascade_sweeps(self, window_s=120):
