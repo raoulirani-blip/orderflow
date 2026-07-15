@@ -1473,16 +1473,22 @@ class Cockpit(QtWidgets.QMainWindow):
         wlbl.setStyleSheet(f"color:{DIM};font-size:11px;font-weight:700;letter-spacing:0.5px;")
         wrow.addWidget(wlbl)
         self.prof_window_combo = QtWidgets.QComboBox()
+        # fenêtres COURTES (live + seed) en secondes
         self.PROF_WINDOWS = {"15 min": 900, "30 min": 1800, "1 heure": 3600,
                              "2 heures": 7200, "4 heures": 14400}
-        self.prof_window_combo.addItems(list(self.PROF_WINDOWS.keys()))
-        self.prof_window_combo.setCurrentText("1 heure")
+        # fenêtres LONGUES (jours) via klines Binance -> (interval, nb bougies)
+        self.PROF_WINDOWS_LONG = {"1 jour": ("5m", 288), "3 jours": ("15m", 288),
+                                  "1 semaine": ("30m", 336), "2 semaines": ("1h", 336),
+                                  "1 mois": ("2h", 360)}
+        self.prof_window_combo.addItems(list(self.PROF_WINDOWS.keys())
+                                        + list(self.PROF_WINDOWS_LONG.keys()))
+        self.prof_window_combo.setCurrentText("1 jour")
         self.prof_window_combo.setStyleSheet(
             f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
             f"color:{TXT};padding:6px 12px;font-weight:700;}}")
         wrow.addWidget(self.prof_window_combo)
-        note = QtWidgets.QLabel("· s'applique aux stats POC/VAH/VAL et au tableau "
-                                "(le graphique TradingView a ses propres réglages)")
+        note = QtWidgets.QLabel("· jours = profil footprint (achat×vente par niveau, "
+                                "POC, value area, murs) depuis les klines Binance")
         note.setStyleSheet(f"color:{DIM};font-size:11px;")
         wrow.addWidget(note); wrow.addStretch()
         outer.addLayout(wrow)
@@ -1510,7 +1516,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self.pf_vah  = prof_stat("VAH  (Value Area High)")
         self.pf_val  = prof_stat("VAL  (Value Area Low)")
         self.pf_va   = prof_stat("VALUE AREA %")
-        self.pf_vol  = prof_stat("VOLUME TOTAL (1h)")
+        self.pf_vol  = prof_stat("VOLUME TOTAL (fenêtre)")
         for w in (self.pf_poc, self.pf_vah, self.pf_val, self.pf_va, self.pf_vol):
             pb.addWidget(w)
         top.addWidget(self.poc_box, 2)
@@ -1536,36 +1542,122 @@ class Cockpit(QtWidgets.QMainWindow):
             gc.addWidget(missing, 1)
         body.addLayout(gc, 3)
 
-        # ---- colonne droite : table (étendue) + cascades ----
+        # ---- colonne droite : PROFIL FOOTPRINT (achat×vente par niveau) + cascades ----
         right = QtWidgets.QVBoxLayout(); right.setSpacing(6)
-        right.addWidget(self._h("TOP NIVEAUX DE VOLUME"))
-        self.prof_table = QtWidgets.QTableWidget(0, 4)
-        self.prof_table.setHorizontalHeaderLabels(["Prix", "Volume BTC", "Achat %", "Statut"])
-        self._prep(self.prof_table)
-        right.addWidget(self.prof_table, 5)
+        self.prof_fp_head = self._h("PROFIL FOOTPRINT  ·  vente ◄ | ► achat par niveau")
+        right.addWidget(self.prof_fp_head)
+        self.prof_fp = pg.PlotWidget()
+        self.prof_fp.setBackground(BG)
+        self.prof_fp.showGrid(x=False, y=True, alpha=0.12)
+        self.prof_fp.setMenuEnabled(False)
+        self.prof_fp.getAxis("left").setTextPen(pg.mkColor(TXT))
+        self.prof_fp.getAxis("bottom").setTextPen(pg.mkColor(DIM))
+        self.prof_fp.getAxis("left").setWidth(70)
+        self.prof_fp.setLabel("bottom", "volume BTC  (vente ◄ 0 ► achat)")
+        self._prof_fp_items = []
+        right.addWidget(self.prof_fp, 6)
         right.addWidget(self._h("SWEEPS EN CASCADE  (multi-niveaux < 0.8s)"))
         self.cascade_text = QtWidgets.QTextEdit(); self.cascade_text.setReadOnly(True)
         self.cascade_text.setStyleSheet(
             f"QTextEdit{{background:{PANEL};border:1px solid {BORDER};"
             f"border-radius:12px;color:{TXT};font-size:12px;padding:10px;}}")
         right.addWidget(self.cascade_text, 2)
-        body.addLayout(right, 2)
+        body.addLayout(right, 3)
         return page
 
+    def _render_profile_fp(self, cells, poc, vah, val, lo, hi, bucket, mid, walls, title):
+        """Dessine le PROFIL FOOTPRINT : barres divergentes vente(gauche)/achat(droite)
+        par niveau, POC, value area, prix actuel et murs marqués."""
+        plt = self.prof_fp
+        for it in self._prof_fp_items:
+            plt.removeItem(it)
+        self._prof_fp_items = []
+        self.prof_fp_head.setText(title)
+        if not cells:
+            return
+        ys = sorted(cells.keys())
+        buys = [cells[p].get("buy", 0.0) for p in ys]
+        sells = [cells[p].get("sell", 0.0) for p in ys]
+        h = bucket * 0.86
+        # value area (bande) en fond
+        va = pg.LinearRegionItem(values=(val, vah), orientation="horizontal",
+                                 movable=False, brush=(120, 120, 170, 26),
+                                 pen=pg.mkPen((120, 120, 170, 60)))
+        va.setZValue(-20); plt.addItem(va); self._prof_fp_items.append(va)
+        # barres divergentes : vente à gauche (rouge), achat à droite (bleu)
+        b_sell = pg.BarGraphItem(x0=[-s for s in sells], width=sells, y=ys, height=h,
+                                 brush=(205, 76, 88), pen=None)
+        b_buy = pg.BarGraphItem(x0=[0] * len(ys), width=buys, y=ys, height=h,
+                                brush=(58, 120, 195), pen=None)
+        plt.addItem(b_sell); plt.addItem(b_buy)
+        self._prof_fp_items += [b_sell, b_buy]
+        # POC (niveau le plus tradé) — aimant
+        pl = pg.InfiniteLine(pos=poc, angle=0, pen=pg.mkPen(VIOLET, width=2),
+                             label=f"POC {poc:,.0f}",
+                             labelOpts={"color": VIOLET, "position": 0.02})
+        plt.addItem(pl); self._prof_fp_items.append(pl)
+        # prix actuel
+        if mid:
+            ml = pg.InfiniteLine(pos=mid, angle=0,
+                                 pen=pg.mkPen("#00e5ff", width=1.4,
+                                              style=QtCore.Qt.PenStyle.DashLine),
+                                 label=f"{mid:,.0f}",
+                                 labelOpts={"color": "#0d1117", "fill": (0, 229, 255, 230),
+                                            "position": 0.98})
+            plt.addItem(ml); self._prof_fp_items.append(ml)
+        # murs (gros ordres actuels) marqués dans la fenêtre du profil
+        maxbuy = max(buys) if buys else 1
+        for w in walls:
+            wp = w.get("price")
+            if wp is None or not (lo <= wp <= hi):
+                continue
+            is_bid = w.get("side") == "bid"
+            col = GREEN if is_bid else RED
+            wl = pg.InfiniteLine(pos=wp, angle=0,
+                                 pen=pg.mkPen(col, width=1, style=QtCore.Qt.PenStyle.DotLine))
+            plt.addItem(wl); self._prof_fp_items.append(wl)
+            txt = pg.TextItem(f"🧱 {w.get('qty', 0):.0f}", color=col, anchor=(0, 0.5))
+            txt.setPos(maxbuy * 1.02, wp)
+            plt.addItem(txt); self._prof_fp_items.append(txt)
+        pad = (hi - lo) * 0.04 + bucket
+        plt.setYRange(lo - pad, hi + pad, padding=0)
+
     def _refresh_profil(self):
+        import time as _t, threading
         mid = self._last_state.get("mid") if self._last_state else None
+        if not hasattr(self, "_profL"):
+            self._profL = {}; self._profL_loading = set()
 
-        # Volume Profile — fenêtre choisie par l'utilisateur
-        window_s = self.PROF_WINDOWS.get(self.prof_window_combo.currentText(), 3600)
-        vp = self.engine.get_volume_profile(window_s=window_s)
-        if vp and mid:
+        label = self.prof_window_combo.currentText()
+        long_mode = label in self.PROF_WINDOWS_LONG
+        vp = None
+        if long_mode:
+            interval, limit = self.PROF_WINDOWS_LONG[label]
+            entry = self._profL.get(label)
+            fresh = entry and (_t.time() - entry[0] < 180)
+            if not fresh and label not in self._profL_loading:
+                self._profL_loading.add(label)
+
+                def _load(lbl=label, iv=interval, lm=limit):
+                    try:
+                        data = self.engine.get_profile_klines(interval=iv, limit=lm)
+                    except Exception:
+                        data = None
+                    self._profL[lbl] = (_t.time(), data)
+                    self._profL_loading.discard(lbl)
+                threading.Thread(target=_load, daemon=True).start()
+            vp = entry[1] if entry else None
+            if vp is None:
+                self.prof_fp_head.setText(f"PROFIL FOOTPRINT · {label} · chargement des klines Binance…")
+        else:
+            window_s = self.PROF_WINDOWS.get(label, 3600)
+            vp = self.engine.get_volume_profile(window_s=window_s)
+
+        if vp:
             poc = vp["poc"]
-            # ligne POC sur la heatmap (page DIRECT)
-            self.poc_line.setValue(poc)
-            self.poc_line.setVisible(True)
-
-            # (le graphique TradingView intégré se met à jour tout seul)
-            col_poc = GREEN if poc < mid else RED
+            if not long_mode and mid:
+                self.poc_line.setValue(poc); self.poc_line.setVisible(True)
+            col_poc = GREEN if (mid and poc < mid) else (RED if mid else TXT)
             self.pf_poc._val.setText(f"{poc:,.0f}")
             self.pf_poc._val.setStyleSheet(f"color:{col_poc};font-size:20px;font-weight:800;")
             self.pf_vah._val.setText(f"{vp['vah']:,.0f}")
@@ -1575,21 +1667,16 @@ class Cockpit(QtWidgets.QMainWindow):
             self.pf_va._val.setText(f"{vp['va_pct']*100:.0f}%")
             self.pf_vol._val.setText(f"{vp['total_vol']:,.0f} BTC")
 
-            # Top levels table
-            top10 = vp["top10"]
-            self.prof_table.setRowCount(len(top10))
-            for i, (price, d) in enumerate(top10):
-                tot = d["total"]; buy_pct = d["buy"] / tot * 100 if tot else 50
-                is_poc = abs(price - poc) < 5
-                status = "🎯 POC" if is_poc else (
-                    "🟢 VAH" if abs(price - vp["vah"]) < 10 else (
-                    "🔵 VAL" if abs(price - vp["val"]) < 10 else "—"))
-                col = QtGui.QColor(VIOLET if is_poc else TXT)
-                cells = [f"{price:,.0f}", f"{tot:.2f}", f"{buy_pct:.0f}%", status]
-                for j, v in enumerate(cells):
-                    it = QtWidgets.QTableWidgetItem(v)
-                    it.setForeground(col if is_poc else QtGui.QColor(TXT))
-                    self.prof_table.setItem(i, j, it)
+            # PROFIL FOOTPRINT : achat×vente par niveau + murs actuels marqués
+            cells = vp.get("cells", {})
+            walls = sorted((self._last_state or {}).get("walls", []),
+                           key=lambda w: w.get("qty", 0), reverse=True)[:10]
+            self._render_profile_fp(
+                cells, poc, vp["vah"], vp["val"],
+                vp.get("lo", min(cells) if cells else 0),
+                vp.get("hi", max(cells) if cells else 0),
+                vp.get("bucket", 10.0), mid, walls,
+                f"PROFIL FOOTPRINT · {label} · vente ◄ | ► achat par niveau")
         else:
             for w in (self.pf_poc, self.pf_vah, self.pf_val, self.pf_va, self.pf_vol):
                 w._val.setText("—")

@@ -1252,7 +1252,7 @@ class OrderFlowEngine:
                 break
         top = sorted(vol.items(), key=lambda kv: kv[1]["total"], reverse=True)
         return {
-            "levels": dict(vol), "poc": poc,
+            "cells": dict(vol), "poc": poc,
             "vah": prices_sorted[hi_idx], "val": prices_sorted[lo_idx],
             "va_pct": va_vol / total_vol, "total_vol": total_vol,
             "hi": hi_all, "lo": lo_all, "bucket": bucket,
