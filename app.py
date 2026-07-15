@@ -261,6 +261,10 @@ class Cockpit(QtWidgets.QMainWindow):
             f"color:{ACCENT};font-size:15px;font-weight:800;background:{PANEL};"
             f"border:1px solid {BORDER};border-radius:8px;padding:4px 12px;")
         crow.addWidget(self.corner_price)
+        # P&L flottant live des positions ouvertes (caché s'il n'y en a pas)
+        self.corner_pnl = QtWidgets.QLabel("")
+        self.corner_pnl.setVisible(False)
+        crow.addWidget(self.corner_pnl)
         vwap_btn = QtWidgets.QPushButton("📈 VWAP")
         vwap_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         vwap_btn.setToolTip("Aller à la page VWAP & CVD (raccourci : Ctrl+V)")
@@ -620,6 +624,33 @@ class Cockpit(QtWidgets.QMainWindow):
             widget._last_html = html
             widget.setHtml(html)
 
+    def _update_live_pnl(self, mid):
+        """P&L FLOTTANT en direct sur les positions ouvertes : pastille dans le coin
+        (toutes les pages) + rafraîchit le tableau du Journal (throttle 1.5s)."""
+        import time as _t
+        j = getattr(self, "_journal", None)
+        tot = 0.0; n = 0
+        if mid and j:
+            for r in j:
+                if r.get("exit") is None and r.get("entry") and r.get("size"):
+                    tot += (mid - r["entry"]) * r["size"] * (1 if r.get("side") == "Long" else -1)
+                    n += 1
+        if hasattr(self, "corner_pnl"):
+            if n:
+                col = GREEN if tot >= 0 else RED
+                self.corner_pnl.setText(f"{'▲' if tot >= 0 else '▼'} {tot:+,.0f} $")
+                self.corner_pnl.setStyleSheet(
+                    f"color:{col};font-size:15px;font-weight:800;background:{PANEL};"
+                    f"border:1px solid {col};border-radius:8px;padding:4px 12px;")
+                self.corner_pnl.setToolTip(f"P&L flottant sur {n} position(s) ouverte(s)")
+                self.corner_pnl.setVisible(True)
+            else:
+                self.corner_pnl.setVisible(False)
+        # rafraîchit le tableau Journal en direct (max 1x / 1.5s)
+        if n and hasattr(self, "j_table") and _t.time() - getattr(self, "_jpnl_ts", 0) > 1.5:
+            self._jpnl_ts = _t.time()
+            self._journal_refresh()
+
     def on_state(self,s):
         self._last_state = s
         self.analyzer.feed(s)
@@ -630,6 +661,7 @@ class Cockpit(QtWidgets.QMainWindow):
         # clôture automatique des trades ouverts qui touchent leur TP / SL
         if _m:
             self._journal_autoclose(_m)
+            self._update_live_pnl(_m)
         if "error" in s:
             self.bias_label.setText("ERREUR"); self.bias_sub.setText(s["error"][:120]); return
         # venue pills
@@ -2533,7 +2565,8 @@ class Cockpit(QtWidgets.QMainWindow):
     def _journal_refresh(self):
         j = getattr(self, "_journal", [])
         self.j_table.setRowCount(len(j))
-        tot_pnl = 0.0; wins = 0; losses = 0; closed = 0
+        mid = (self._last_state or {}).get("mid")
+        tot_pnl = 0.0; tot_float = 0.0; wins = 0; losses = 0; closed = 0
         for i, r in enumerate(j):
             entry = r.get("entry"); sl = r.get("sl"); tp = r.get("tp")
             size = r.get("size"); ex = r.get("exit")
@@ -2542,31 +2575,38 @@ class Cockpit(QtWidgets.QMainWindow):
             rr = None
             if entry and tp and sl and abs(entry - sl) > 0:
                 rr = abs(tp - entry) / abs(entry - sl)
-            # P&L = (sortie - entrée) * taille * sens
-            pnl = None
-            if entry and ex and size:
+            pnl = None      # réalisé (trade clôturé)
+            fpnl = None     # flottant (position ouverte, en direct)
+            if entry and ex is not None and size:
                 pnl = (ex - entry) * size * (1 if is_long else -1)
                 tot_pnl += pnl; closed += 1
                 if pnl >= 0:
                     wins += 1
                 else:
                     losses += 1
-            if pnl is None:
-                res_txt, res_col = "ouvert", AMBER
-            elif pnl >= 0:
-                res_txt, res_col = "WIN", GREEN
+            elif entry and size and mid:               # OUVERT -> P&L flottant live
+                fpnl = (mid - entry) * size * (1 if is_long else -1)
+                tot_float += fpnl
+            # colonnes P&L + Résultat
+            if pnl is not None:
+                pnl_txt, pnl_col = f"{pnl:+,.0f} $", GREEN if pnl >= 0 else RED
+                res_txt, res_col = ("WIN", GREEN) if pnl >= 0 else ("LOSS", RED)
+            elif fpnl is not None:
+                pnl_txt, pnl_col = f"~{fpnl:+,.0f} $", GREEN if fpnl >= 0 else RED
+                res_txt = f"ouvert  {fpnl:+,.0f}$"; res_col = GREEN if fpnl >= 0 else RED
             else:
-                res_txt, res_col = "LOSS", RED
+                pnl_txt, pnl_col = "—", DIM
+                res_txt, res_col = "ouvert", AMBER
             cells = [
                 (r.get("date", "—"), DIM),
                 (r.get("side", "—"), GREEN if is_long else RED),
                 (f"{entry:,.0f}" if entry else "—", TXT),
                 (f"{sl:,.0f}" if sl else "—", RED),
                 (f"{tp:,.0f}" if tp else "—", GREEN),
-                (f"{ex:,.0f}" if ex else "—", TXT),
+                (f"{ex:,.0f}" if ex is not None else "—", TXT),
                 (f"{size:.3f}" if size else "—", TXT),
                 (f"{rr:.2f}:1" if rr else "—", GREEN if (rr and rr >= 2) else TXT),
-                (f"{pnl:+,.0f} $" if pnl is not None else "—", GREEN if (pnl or 0) >= 0 else RED),
+                (pnl_txt, pnl_col),
                 (res_txt, res_col),
                 (r.get("note", ""), DIM),
             ]
@@ -2580,15 +2620,21 @@ class Cockpit(QtWidgets.QMainWindow):
             self.j_dash.setText("Aucun trade pour l'instant. Ajoute ton premier trade ci-dessus.")
             return
         wr = (wins / closed * 100) if closed else 0
+        open_n = len(j) - closed
         pnlcol = GREEN if tot_pnl >= 0 else RED
+        float_txt = ""
+        if open_n and mid:
+            fcol = "▲" if tot_float >= 0 else "▼"
+            float_txt = (f"  ·  <span style='color:{GREEN if tot_float>=0 else RED};'>"
+                         f"P&L FLOTTANT (live) : {tot_float:+,.0f} $ {fcol}</span>")
         self.j_dash.setText(
             f"📊 {len(j)} trades  ·  {closed} clôturés  ·  "
             f"Win-rate : {wr:.0f}% ({wins}W / {losses}L)  ·  "
-            f"P&L total : {tot_pnl:+,.0f} $  ·  "
-            f"{len(j)-closed} ouvert(s)")
+            f"<span style='color:{pnlcol};'>P&L réalisé : {tot_pnl:+,.0f} $</span>  ·  "
+            f"{open_n} ouvert(s){float_txt}")
         self.j_dash.setStyleSheet(
-            f"color:{pnlcol};font-size:14px;font-weight:800;background:{PANEL2};"
-            f"border:1px solid {pnlcol};border-radius:10px;padding:10px 14px;")
+            f"color:{TXT};font-size:14px;font-weight:800;background:{PANEL2};"
+            f"border:1px solid {BORDER};border-radius:10px;padding:10px 14px;")
 
     # ===========================================================
     # ALERTES WHATSAPP (critères précis + fenêtre horaire)
