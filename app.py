@@ -625,6 +625,9 @@ class Cockpit(QtWidgets.QMainWindow):
         _m = s.get("mid")
         if _m and hasattr(self, "corner_price"):
             self.corner_price.setText(f"₿ {_m:,.1f} $")
+        # clôture automatique des trades ouverts qui touchent leur TP / SL
+        if _m:
+            self._journal_autoclose(_m)
         if "error" in s:
             self.bias_label.setText("ERREUR"); self.bias_sub.setText(s["error"][:120]); return
         # venue pills
@@ -2260,9 +2263,11 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(12)
 
         intro = QtWidgets.QLabel(
-            "Journal de trades : note chaque trade pris (date, sens, entrée, stop, take "
-            "profit, taille, sortie). L'app calcule le R:R et le P&L, et garde tout sur "
-            "disque (trade_journal.json). Un tableau de bord résume ton win-rate et ton P&L total.")
+            "Journal de trades. Les positions envoyées depuis le calculateur se clôturent "
+            "TOUTES SEULES dès que le prix live touche leur TP (WIN) ou leur SL (LOSS) — "
+            "tant que l'appli est ouverte. Tu peux aussi clôturer à la main un trade "
+            "sélectionné. L'app calcule le R:R et le P&L, garde tout sur disque, et résume "
+            "ton win-rate. (Prix des bourses crypto — proche mais pas identique à ton broker.)")
         intro.setWordWrap(True)
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
@@ -2381,6 +2386,41 @@ class Cockpit(QtWidgets.QMainWindow):
                 self._journal.pop(r)
         self._journal_save()
         self._journal_refresh()
+
+    def _journal_autoclose(self, mid):
+        """Surveille le prix live : clôture TOUTE SEULE chaque trade ouvert dès que le
+        prix touche son TP (WIN) ou son SL (LOSS). Basé sur le prix des bourses
+        (Binance/OKX/Bybit) — proche mais pas identique au prix exact de ton broker."""
+        if not mid or not getattr(self, "_journal", None):
+            return
+        import time as _t
+        changed = False
+        for rec in self._journal:
+            if rec.get("exit") is not None:
+                continue
+            tp = rec.get("tp"); sl = rec.get("sl")
+            is_long = rec.get("side") == "Long"
+            hit = None
+            if is_long:
+                if tp is not None and mid >= tp:
+                    hit = ("TP", tp)
+                elif sl is not None and mid <= sl:
+                    hit = ("SL", sl)
+            else:
+                if tp is not None and mid <= tp:
+                    hit = ("TP", tp)
+                elif sl is not None and mid >= sl:
+                    hit = ("SL", sl)
+            if hit:
+                kind, price = hit
+                rec["exit"] = price
+                rec["note"] = (f"TP atteint auto · {_t.strftime('%H:%M:%S')}" if kind == "TP"
+                               else f"SL atteint auto · {_t.strftime('%H:%M:%S')}")
+                changed = True
+        if changed:
+            self._journal_save()
+            if hasattr(self, "j_table"):
+                self._journal_refresh()
 
     def _journal_close(self, kind):
         """Clôture le trade sélectionné : au TP -> sortie = TP (WIN), au SL -> sortie
