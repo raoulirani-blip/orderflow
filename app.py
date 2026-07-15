@@ -1848,13 +1848,17 @@ class Cockpit(QtWidgets.QMainWindow):
         form = QtWidgets.QFormLayout(); form.setSpacing(10)
         form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
-        self.calc_capital = self._calc_input("10000")
-        self.calc_risk    = self._calc_input("1.25")     # en %
-        self.calc_sl      = self._calc_input("140")      # $ par BTC
-        self.calc_entry   = self._calc_input("")         # optionnel
-        self.calc_tp      = self._calc_input("")         # optionnel
+        # réglages persistants (capital / risque / stop / sens) — repris au lancement,
+        # ne se remettent PLUS à 10k à chaque ouverture
+        st = self._calc_load_settings()
+        self.calc_capital = self._calc_input(st.get("capital", "10000"))
+        self.calc_risk    = self._calc_input(st.get("risk", "1.25"))    # en %
+        self.calc_sl      = self._calc_input(st.get("sl", "140"))       # $ par BTC
+        self.calc_entry   = self._calc_input("")         # optionnel (par trade)
+        self.calc_tp      = self._calc_input("")         # optionnel (par trade)
         self.calc_side    = QtWidgets.QComboBox()
         self.calc_side.addItems(["Long", "Short"])
+        self.calc_side.setCurrentText(st.get("side", "Long"))
         self.calc_side.setStyleSheet(
             f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
             f"color:{TXT};padding:8px 12px;font-weight:700;}}")
@@ -1888,6 +1892,26 @@ class Cockpit(QtWidgets.QMainWindow):
             f"color:{TXT};font-size:14px;font-weight:800;background:{PANEL2};"
             f"border:2px solid {BORDER};border-radius:10px;padding:12px;")
         outbox.addWidget(self.calc_alert)
+
+        # ----- boutons de clôture -> Journal -----
+        btnrow = QtWidgets.QHBoxLayout(); btnrow.setSpacing(8)
+
+        def mkbtn(txt, bg, fg, cb):
+            b = QtWidgets.QPushButton(txt)
+            b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton{{background:{bg};color:{fg};border:none;border-radius:9px;"
+                f"padding:11px 14px;font-weight:800;font-size:13px;}}"
+                f"QPushButton:hover{{opacity:0.9;}}")
+            b.clicked.connect(cb)
+            return b
+
+        btnrow.addWidget(mkbtn("✅ T.P touché", GREEN, "#06210f",
+                               lambda: self._calc_log_trade("TP")))
+        btnrow.addWidget(mkbtn("🛑 S.L touché", RED, "#2a0708",
+                               lambda: self._calc_log_trade("SL")))
+        btnrow.addWidget(mkbtn("⚪ Trade pas pris", PANEL2, TXT, self._calc_skip_trade))
+        outbox.addLayout(btnrow)
         body.addLayout(outbox, 1)
 
         # rangées fixes du tableau résultats
@@ -1979,6 +2003,97 @@ class Cockpit(QtWidgets.QMainWindow):
             self.calc_alert.setStyleSheet(
                 f"color:{GREEN};font-size:14px;font-weight:800;background:{PANEL2};"
                 f"border:2px solid {GREEN};border-radius:10px;padding:12px;")
+
+        # mémorise capital / risque / stop / sens pour la prochaine ouverture
+        self._calc_save_settings()
+
+    # ---- persistance des réglages du calculateur (capital, risque, stop, sens) ----
+    def _calc_settings_path(self):
+        import os
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "calc_settings.json")
+
+    def _calc_load_settings(self):
+        import json, os
+        p = self._calc_settings_path()
+        if not os.path.exists(p):
+            return {}
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _calc_save_settings(self):
+        import json
+        if not hasattr(self, "calc_capital"):
+            return
+        data = {"capital": self.calc_capital.text().strip(),
+                "risk": self.calc_risk.text().strip(),
+                "sl": self.calc_sl.text().strip(),
+                "side": self.calc_side.currentText()}
+        try:
+            with open(self._calc_settings_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _calc_nums(self):
+        """Lit les entrées du calculateur -> (cap, risk, sld, entry, tp, is_long)."""
+        def num(w):
+            try:
+                return float(str(w.text()).replace(",", ".").replace(" ", "").replace("$", ""))
+            except (ValueError, AttributeError):
+                return None
+        return (num(self.calc_capital), num(self.calc_risk), num(self.calc_sl),
+                num(self.calc_entry), num(self.calc_tp),
+                self.calc_side.currentText() == "Long")
+
+    def _calc_log_trade(self, result):
+        """Clôt le trade en cours (T.P touché / S.L touché) et l'envoie au JOURNAL,
+        en gardant capital et risque intacts. result = 'TP' ou 'SL'."""
+        import time as _t
+        cap, risk, sld, entry, tp, is_long = self._calc_nums()
+        if entry is None or sld is None:
+            self._calc_flash("⚠️ Entre au moins le prix d'entrée et la distance du stop "
+                             "pour enregistrer le trade.", RED)
+            return
+        if result == "TP" and tp is None:
+            self._calc_flash("⚠️ Entre le prix Take Profit pour enregistrer un T.P touché.", RED)
+            return
+        sl_price = (entry - sld) if is_long else (entry + sld)
+        size = (cap * (risk / 100.0) / sld) if (cap is not None and risk is not None and sld) else None
+        exit_price = tp if result == "TP" else sl_price
+        rec = {
+            "date": _t.strftime("%Y-%m-%d %H:%M:%S"),
+            "side": "Long" if is_long else "Short",
+            "entry": entry, "sl": sl_price, "tp": tp, "size": size,
+            "exit": exit_price,
+            "note": "T.P touché ✅" if result == "TP" else "S.L touché 🛑",
+        }
+        if not hasattr(self, "_journal"):
+            self._journal = self._journal_load()
+        self._journal.append(rec)
+        self._journal_save()
+        if hasattr(self, "_journal_refresh"):
+            self._journal_refresh()
+        # garde capital/risque, vide seulement l'entrée et le TP pour le prochain trade
+        self.calc_entry.clear(); self.calc_tp.clear()
+        pnl = ((exit_price - entry) * size * (1 if is_long else -1)) if size else None
+        pnl_txt = f"  ·  P&L {pnl:+,.0f} $" if pnl is not None else ""
+        self._calc_flash(f"{'✅ WIN' if result == 'TP' else '🛑 LOSS'} enregistré dans le "
+                         f"Journal{pnl_txt}. Capital et risque conservés.",
+                         GREEN if result == "TP" else RED)
+
+    def _calc_skip_trade(self):
+        """Trade non pris : ne journalise rien, garde capital et risque, vide l'entrée/TP."""
+        self.calc_entry.clear(); self.calc_tp.clear()
+        self._calc_flash("⚪ Trade non pris. Capital et risque conservés.", DIM)
+
+    def _calc_flash(self, msg, color):
+        self.calc_alert.setText(msg)
+        self.calc_alert.setStyleSheet(
+            f"color:{color};font-size:14px;font-weight:800;background:{PANEL2};"
+            f"border:2px solid {color};border-radius:10px;padding:12px;")
 
     # ===========================================================
     # JOURNAL DE TRADES (saisie manuelle + persistance)
@@ -3277,6 +3392,15 @@ class Cockpit(QtWidgets.QMainWindow):
         fb.addWidget(cap); fb.addWidget(self.fng_val); fb.addWidget(self.fng_txt, 1)
         outer.addWidget(self.fng_box)
 
+        # ---- calendrier économique US (CPI / PPI / FOMC / NFP) ----
+        outer.addWidget(self._h("📅 CALENDRIER ÉCONOMIQUE US  ·  les rendez-vous qui font bouger le BTC (heure de Paris)"))
+        self.econ_browser = QtWidgets.QTextBrowser()
+        self.econ_browser.setFixedHeight(148)
+        self.econ_browser.setStyleSheet(
+            f"QTextBrowser{{background:{PANEL};border:1px solid {BORDER};"
+            f"border-radius:12px;color:{TXT};font-size:13px;padding:10px;}}")
+        outer.addWidget(self.econ_browser)
+
         # ---- fil d'actus trié, pleine largeur ----
         self.news_head = self._h("FIL D'ACTUALITÉS TRIÉ PAR IMPORTANCE  ·  en attente du premier chargement…")
         outer.addWidget(self.news_head)
@@ -3288,7 +3412,58 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.addWidget(self.news_browser, 1)
         return page
 
+    def _econ_render(self):
+        """Affiche les prochains CPI/PPI/FOMC/NFP en heure locale + compte à rebours."""
+        import datetime
+        events = self.newsfeed.get_econ() if hasattr(self, "newsfeed") else []
+        if not events:
+            self._hset(self.econ_browser,
+                       f"<span style='color:{DIM};'>Chargement du calendrier économique…</span>")
+            return
+        now = datetime.datetime.now(datetime.timezone.utc)
+        rows = []
+        for e in events:
+            try:
+                dt = datetime.datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
+            except (ValueError, KeyError):
+                continue
+            delta = (dt - now).total_seconds()
+            if delta < -3 * 3600:          # passé depuis >3h -> on n'affiche plus
+                continue
+            local = dt.astimezone()        # heure locale (Paris)
+            when = local.strftime("%a %d %b · %Hh%M")
+            if delta < 0:
+                cd, cdc = "EN COURS / publié", AMBER
+            elif delta < 3600:
+                cd, cdc = f"dans {delta/60:.0f} min", RED
+            elif delta < 86400:
+                cd, cdc = f"dans {delta/3600:.0f} h", RED
+            elif delta < 2 * 86400:
+                cd, cdc = "demain", AMBER
+            else:
+                cd, cdc = f"dans {delta/86400:.0f} j", DIM
+            imp = e.get("importance", 0)
+            dot = "🔴" if imp >= 1 else "🟠"
+            prev = e.get("previous"); fcst = e.get("forecast")
+            extra = []
+            if fcst not in (None, ""):
+                extra.append(f"prévu {fcst}")
+            if prev not in (None, ""):
+                extra.append(f"préc. {prev}")
+            extra_html = (f"  <span style='color:{DIM};font-size:11px;'>"
+                          f"({' · '.join(extra)})</span>") if extra else ""
+            rows.append(
+                f"<div style='margin-bottom:7px;'>{dot} "
+                f"<span style='color:{TXT};font-weight:800;'>{e['label']}</span>"
+                f"  <span style='color:{DIM};'>{when}</span>"
+                f"  <span style='color:{cdc};font-weight:800;'>· {cd}</span>{extra_html}</div>")
+            if len(rows) >= 6:
+                break
+        self._hset(self.econ_browser, "".join(rows) if rows else
+                   f"<span style='color:{DIM};'>Aucun événement macro majeur à venir.</span>")
+
     def _refresh_news(self):
+        self._econ_render()
         items, fng, last_fetch = self.newsfeed.get_news()
 
         # Fear & Greed

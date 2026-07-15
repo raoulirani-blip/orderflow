@@ -88,11 +88,23 @@ class NewsFeed:
     ]
     FNG_URL = "https://api.alternative.me/fng/?limit=2"
 
+    # calendrier économique US (TradingView, public, sans clé). On ne garde QUE les
+    # rendez-vous macro qui bougent vraiment le BTC.
+    ECON_URL = "https://economic-calendar.tradingview.com/events"
+    ECON_WANT = [
+        ("consumer price", "CPI (inflation US)"), ("cpi", "CPI (inflation US)"),
+        ("producer price", "PPI (prix producteurs)"), ("ppi", "PPI (prix producteurs)"),
+        ("non farm payroll", "NFP (emploi US)"), ("nonfarm payroll", "NFP (emploi US)"),
+        ("fed interest rate", "FOMC (taux Fed)"), ("federal funds", "FOMC (taux Fed)"),
+        ("fomc", "FOMC (taux Fed)"),
+    ]
+
     def __init__(self, refresh_s=300):
         self.refresh_s = refresh_s
         self._lock = threading.Lock()
         self._items = []          # [{source,title,link,date,hot}]
         self._fng = None          # {"value":int,"label":str,"yesterday":int}
+        self._econ = []           # [{label,title,date,importance,forecast,previous,actual}]
         self._last_fetch = 0
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -108,6 +120,10 @@ class NewsFeed:
         with self._lock:
             return list(self._items), self._fng, self._last_fetch
 
+    def get_econ(self):
+        with self._lock:
+            return list(self._econ)
+
     # ---------- fetch (thread fond) ----------
     def _loop(self):
         while self._running:
@@ -118,10 +134,13 @@ class NewsFeed:
                 # tri du plus récent au plus ancien
                 items.sort(key=lambda x: x.get("ts", 0), reverse=True)
                 fng = self._fetch_fng()
+                econ = self._fetch_econ()
                 with self._lock:
                     self._items = items[:40]
                     if fng:
                         self._fng = fng
+                    if econ is not None:
+                        self._econ = econ
                     self._last_fetch = time.time()
             except Exception:
                 pass
@@ -162,6 +181,40 @@ class NewsFeed:
             except Exception:
                 continue
         return 0
+
+    def _fetch_econ(self):
+        """Calendrier éco US (30 jours) — ne garde que CPI, PPI, NFP, FOMC. Un seul
+        événement par (type, jour), en gardant le plus important (le titre principal)."""
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        frm = now.strftime("%Y-%m-%dT00:00:00.000Z")
+        to = (now + datetime.timedelta(days=30)).strftime("%Y-%m-%dT00:00:00.000Z")
+        try:
+            r = requests.get(self.ECON_URL,
+                             params={"from": frm, "to": to, "countries": "US"},
+                             headers={"User-Agent": "Mozilla/5.0",
+                                      "Origin": "https://www.tradingview.com"},
+                             timeout=15)
+            res = r.json().get("result", [])
+        except Exception:
+            return None
+        bykey = {}
+        for e in res:
+            title = (e.get("title") or e.get("indicator") or "")
+            low = title.lower()
+            label = next((v for k, v in self.ECON_WANT if k in low), None)
+            if not label:
+                continue
+            date = e.get("date", "") or ""
+            key = (label, date[:10])
+            imp = e.get("importance", -1)
+            if imp is None:
+                imp = -1
+            if key not in bykey or imp > bykey[key]["importance"]:
+                bykey[key] = {"label": label, "title": title, "date": date,
+                              "importance": imp, "actual": e.get("actual"),
+                              "forecast": e.get("forecast"), "previous": e.get("previous")}
+        return sorted(bykey.values(), key=lambda x: x["date"])
 
     def _fetch_fng(self):
         try:
