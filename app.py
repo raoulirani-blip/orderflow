@@ -1988,8 +1988,8 @@ class Cockpit(QtWidgets.QMainWindow):
         st = self._calc_load_settings()
         self.calc_capital = self._calc_input(st.get("capital", "10000"))
         self.calc_risk    = self._calc_input(st.get("risk", "1.25"))    # en %
-        self.calc_sl      = self._calc_input(st.get("sl", "140"))       # $ par BTC
-        self.calc_entry   = self._calc_input("")         # optionnel (par trade)
+        self.calc_sl      = self._calc_input("")         # PRIX du stop (par trade)
+        self.calc_entry   = self._calc_input("")         # prix d'entrée (par trade)
         self.calc_tp      = self._calc_input("")         # optionnel (par trade)
         self.calc_side    = QtWidgets.QComboBox()
         self.calc_side.addItems(["Long", "Short"])
@@ -2004,8 +2004,8 @@ class Cockpit(QtWidgets.QMainWindow):
             return l
         form.addRow(flbl("Capital total ($)"), self.calc_capital)
         form.addRow(flbl("Risque par trade (%)"), self.calc_risk)
-        form.addRow(flbl("Distance du Stop Loss ($/BTC)"), self.calc_sl)
-        form.addRow(flbl("Prix d'entrée BTC ($) — optionnel"), self.calc_entry)
+        form.addRow(flbl("Prix d'entrée BTC ($)"), self.calc_entry)
+        form.addRow(flbl("Prix du Stop Loss ($)"), self.calc_sl)
         form.addRow(flbl("Prix Take Profit ($) — optionnel"), self.calc_tp)
         form.addRow(flbl("Sens du trade"), self.calc_side)
         inbox.addLayout(form)
@@ -2052,7 +2052,7 @@ class Cockpit(QtWidgets.QMainWindow):
         # rangées fixes du tableau résultats
         self._calc_rows = [
             "Montant risqué ($)", "Taille de position (BTC)", "Valeur de la position ($)",
-            "Levier utilisé (x)", "Prix du Stop Loss ($)", "Distance du Take Profit ($/BTC)",
+            "Levier utilisé (x)", "Distance du Stop Loss ($)", "Distance du Take Profit ($/BTC)",
             "Ratio Risque/Récompense (R:R)", "% du capital utilisé (marge)",
             "Gain au Take Profit ($)", "Gain au Take Profit (% capital)",
         ]
@@ -2073,10 +2073,12 @@ class Cockpit(QtWidgets.QMainWindow):
                 return None
         cap  = num(self.calc_capital)
         risk = num(self.calc_risk)
-        sld  = num(self.calc_sl)
+        sl_price = num(self.calc_sl)          # PRIX du stop (plus la distance)
         entry = num(self.calc_entry)
         tp    = num(self.calc_tp)
         is_long = self.calc_side.currentText() == "Long"
+        # distance du stop = écart entre l'entrée et le prix du stop
+        sld = abs(entry - sl_price) if (entry is not None and sl_price is not None) else None
 
         vals = ["—"] * len(self._calc_rows)
         cols = [TXT] * len(self._calc_rows)
@@ -2095,9 +2097,8 @@ class Cockpit(QtWidgets.QMainWindow):
         lev = pos_val / cap if (pos_val is not None and cap) else None
         if lev is not None:
             vals[3] = f"{lev:.2f} x"; cols[3] = AMBER if lev > 1 else TXT
-        if entry and sld is not None:
-            sl_price = entry - sld if is_long else entry + sld
-            vals[4] = f"{sl_price:,.0f} $"; cols[4] = RED
+        if sld is not None:
+            vals[4] = f"{sld:,.0f} $"; cols[4] = RED
         dist_tp = abs(tp - entry) if (tp and entry) else None
         if dist_tp is not None:
             vals[5] = f"{dist_tp:,.0f} $"
@@ -2120,9 +2121,9 @@ class Cockpit(QtWidgets.QMainWindow):
 
         # alerte marge / levier
         if lev is None:
-            self.calc_alert.setText("Entre au moins Capital, Risque % et Distance du stop "
-                                    "pour la taille de position. Ajoute le prix d'entrée pour "
-                                    "la valeur $ et le levier.")
+            self.calc_alert.setText("Entre Capital, Risque %, Prix d'entrée et Prix du Stop "
+                                    "pour la taille de position, le levier et le R:R. "
+                                    "Le Take Profit est optionnel.")
             self.calc_alert.setStyleSheet(
                 f"color:{DIM};font-size:13px;font-weight:600;background:{PANEL2};"
                 f"border:2px solid {BORDER};border-radius:10px;padding:12px;")
@@ -2164,7 +2165,6 @@ class Cockpit(QtWidgets.QMainWindow):
             return
         data = {"capital": self.calc_capital.text().strip(),
                 "risk": self.calc_risk.text().strip(),
-                "sl": self.calc_sl.text().strip(),
                 "side": self.calc_side.currentText()}
         try:
             with open(self._calc_settings_path(), "w", encoding="utf-8") as f:
@@ -2173,7 +2173,7 @@ class Cockpit(QtWidgets.QMainWindow):
             pass
 
     def _calc_nums(self):
-        """Lit les entrées du calculateur -> (cap, risk, sld, entry, tp, is_long)."""
+        """Lit les entrées du calculateur -> (cap, risk, sl_price, entry, tp, is_long)."""
         def num(w):
             try:
                 return float(str(w.text()).replace(",", ".").replace(" ", "").replace("$", ""))
@@ -2187,15 +2187,15 @@ class Cockpit(QtWidgets.QMainWindow):
         """Clôt le trade en cours (T.P touché / S.L touché) et l'envoie au JOURNAL,
         en gardant capital et risque intacts. result = 'TP' ou 'SL'."""
         import time as _t
-        cap, risk, sld, entry, tp, is_long = self._calc_nums()
-        if entry is None or sld is None:
-            self._calc_flash("⚠️ Entre au moins le prix d'entrée et la distance du stop "
+        cap, risk, sl_price, entry, tp, is_long = self._calc_nums()
+        if entry is None or sl_price is None:
+            self._calc_flash("⚠️ Entre au moins le prix d'entrée et le prix du stop "
                              "pour enregistrer le trade.", RED)
             return
         if result == "TP" and tp is None:
             self._calc_flash("⚠️ Entre le prix Take Profit pour enregistrer un T.P touché.", RED)
             return
-        sl_price = (entry - sld) if is_long else (entry + sld)
+        sld = abs(entry - sl_price)
         size = (cap * (risk / 100.0) / sld) if (cap is not None and risk is not None and sld) else None
         exit_price = tp if result == "TP" else sl_price
         rec = {
