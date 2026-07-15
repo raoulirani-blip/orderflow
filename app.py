@@ -1460,51 +1460,63 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(12)
 
         intro = QtWidgets.QLabel(
-            "Volume Profile : où s'est vraiment traité le volume (POC = aimant à prix). "
-            "Stacked Imbalances : zones où le carnet est déséquilibré sur plusieurs niveaux consécutifs. "
-            "Sweeps en cascade : trades agressifs multi-niveaux en < 0.8s.")
+            "Profil footprint : pour chaque niveau de prix, le volume ACHAT (bleu, à droite) "
+            "vs VENTE (rouge, à gauche). Le POC est l'aimant, la Value Area la zone d'équilibre, "
+            "les murs actuels sont marqués 🧱. Survole un niveau pour les chiffres exacts.")
         intro.setWordWrap(True)
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
 
-        # sélecteur de fenêtre temporelle du profil
-        wrow = QtWidgets.QHBoxLayout(); wrow.setSpacing(8)
-        wlbl = QtWidgets.QLabel("FENÊTRE DU PROFIL :")
-        wlbl.setStyleSheet(f"color:{DIM};font-size:11px;font-weight:700;letter-spacing:0.5px;")
-        wrow.addWidget(wlbl)
-        self.prof_window_combo = QtWidgets.QComboBox()
-        # fenêtres COURTES (live + seed) en secondes
+        # fenêtres COURTES (live + seed) en secondes / LONGUES (jours) via klines
         self.PROF_WINDOWS = {"15 min": 900, "30 min": 1800, "1 heure": 3600,
                              "2 heures": 7200, "4 heures": 14400}
-        # fenêtres LONGUES (jours) via klines Binance -> (interval, nb bougies)
         self.PROF_WINDOWS_LONG = {"1 jour": ("5m", 288), "3 jours": ("15m", 288),
                                   "1 semaine": ("30m", 336), "2 semaines": ("1h", 336),
                                   "1 mois": ("2h", 360)}
-        self.prof_window_combo.addItems(list(self.PROF_WINDOWS.keys())
-                                        + list(self.PROF_WINDOWS_LONG.keys()))
-        self.prof_window_combo.setCurrentText("1 jour")
-        self.prof_window_combo.setStyleSheet(
-            f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
-            f"color:{TXT};padding:6px 12px;font-weight:700;}}")
-        wrow.addWidget(self.prof_window_combo)
-        note = QtWidgets.QLabel("· jours = profil footprint (achat×vente par niveau, "
-                                "POC, value area, murs) depuis les klines Binance")
-        note.setStyleSheet(f"color:{DIM};font-size:11px;")
-        wrow.addWidget(note); wrow.addStretch()
+        # résolution -> (target_levels pour klines, bucket $ pour fenêtres courtes)
+        self.PROF_RES = {"Auto": (110, 10.0), "Fine": (190, 5.0), "Large": (65, 25.0)}
+
+        # ---- barre d'options ----
+        wrow = QtWidgets.QHBoxLayout(); wrow.setSpacing(8)
+
+        def _olbl(t):
+            l = QtWidgets.QLabel(t)
+            l.setStyleSheet(f"color:{DIM};font-size:11px;font-weight:700;letter-spacing:0.5px;")
+            return l
+
+        def _ocombo(items, cur):
+            c = QtWidgets.QComboBox(); c.addItems(items); c.setCurrentText(cur)
+            c.setStyleSheet(f"QComboBox{{background:{PANEL};border:1px solid {BORDER};"
+                            f"border-radius:8px;color:{TXT};padding:6px 12px;font-weight:700;}}")
+            return c
+
+        self.prof_window_combo = _ocombo(list(self.PROF_WINDOWS.keys())
+                                         + list(self.PROF_WINDOWS_LONG.keys()), "1 jour")
+        self.prof_mode_combo = _ocombo(["Achat × Vente", "Delta net"], "Achat × Vente")
+        self.prof_res_combo = _ocombo(list(self.PROF_RES.keys()), "Auto")
+        self.prof_values_chk = QtWidgets.QCheckBox("Valeurs BTC")
+        self.prof_values_chk.setChecked(True)
+        self.prof_values_chk.setStyleSheet(f"color:{TXT};font-size:12px;font-weight:700;")
+        for w in (_olbl("FENÊTRE :"), self.prof_window_combo, _olbl("  MODE :"),
+                  self.prof_mode_combo, _olbl("  RÉSOLUTION :"), self.prof_res_combo,
+                  self.prof_values_chk):
+            wrow.addWidget(w)
+        wrow.addStretch()
+        for c in (self.prof_window_combo, self.prof_mode_combo, self.prof_res_combo):
+            c.currentIndexChanged.connect(self._refresh_profil)
+        self.prof_values_chk.stateChanged.connect(self._refresh_profil)
         outer.addLayout(wrow)
 
-        top = QtWidgets.QHBoxLayout(); top.setSpacing(10); outer.addLayout(top)
-
-        # POC / VAH / VAL hero
+        # ---- bandeau stats POC / VAH / VAL / VA% / VOLUME (pleine largeur) ----
         self.poc_box = QtWidgets.QFrame()
         self.poc_box.setStyleSheet(
             f"QFrame{{background:{PANEL};border:2px solid {VIOLET};border-radius:14px;}}")
         pb = QtWidgets.QHBoxLayout(self.poc_box)
-        pb.setContentsMargins(22, 14, 22, 14); pb.setSpacing(28)
+        pb.setContentsMargins(22, 12, 22, 12); pb.setSpacing(28)
 
         def prof_stat(label):
             f = QtWidgets.QFrame(); f.setStyleSheet("QFrame{border:none;}")
-            lay = QtWidgets.QVBoxLayout(f); lay.setSpacing(2); lay.setContentsMargins(0,0,0,0)
+            lay = QtWidgets.QVBoxLayout(f); lay.setSpacing(2); lay.setContentsMargins(0, 0, 0, 0)
             lbl = QtWidgets.QLabel(label)
             lbl.setStyleSheet(f"color:{DIM};font-size:10px;font-weight:700;letter-spacing:1px;")
             val = QtWidgets.QLabel("—")
@@ -1519,51 +1531,66 @@ class Cockpit(QtWidgets.QMainWindow):
         self.pf_vol  = prof_stat("VOLUME TOTAL (fenêtre)")
         for w in (self.pf_poc, self.pf_vah, self.pf_val, self.pf_va, self.pf_vol):
             pb.addWidget(w)
-        top.addWidget(self.poc_box, 2)
+        pb.addStretch()
+        outer.addWidget(self.poc_box)
 
-        body = QtWidgets.QHBoxLayout(); body.setSpacing(10); outer.addLayout(body, 2)
-
-        # ---- vrai graphique TradingView intégré (temps réel, interactif) ----
-        gc = QtWidgets.QVBoxLayout(); gc.setSpacing(6)
-        gc.addWidget(self._h("GRAPHIQUE TRADINGVIEW  ·  BTCUSDT perp Binance  ·  "
-                             "temps réel, VWAP inclus, tous les outils TradingView"))
-        if HAS_WEBENGINE:
-            self.tv_view = QWebEngineView()
-            self.tv_view.setHtml(TRADINGVIEW_HTML, QtCore.QUrl("https://www.tradingview.com/"))
-            self.tv_view.setStyleSheet(f"border:1px solid {BORDER};border-radius:8px;")
-            gc.addWidget(self.tv_view, 1)
-        else:
-            missing = QtWidgets.QLabel(
-                "⚠ Le graphique TradingView nécessite le module PyQt6-WebEngine.\n"
-                "Lance :  py -3.12 -m pip install PyQt6-WebEngine  puis redémarre l'appli.")
-            missing.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            missing.setStyleSheet(f"color:{AMBER};font-size:14px;background:{PANEL};"
-                                  f"border:1px solid {BORDER};border-radius:12px;padding:30px;")
-            gc.addWidget(missing, 1)
-        body.addLayout(gc, 3)
-
-        # ---- colonne droite : PROFIL FOOTPRINT (achat×vente par niveau) + cascades ----
-        right = QtWidgets.QVBoxLayout(); right.setSpacing(6)
+        # ---- PROFIL FOOTPRINT plein écran ----
         self.prof_fp_head = self._h("PROFIL FOOTPRINT  ·  vente ◄ | ► achat par niveau")
-        right.addWidget(self.prof_fp_head)
+        outer.addWidget(self.prof_fp_head)
         self.prof_fp = pg.PlotWidget()
         self.prof_fp.setBackground(BG)
         self.prof_fp.showGrid(x=False, y=True, alpha=0.12)
         self.prof_fp.setMenuEnabled(False)
         self.prof_fp.getAxis("left").setTextPen(pg.mkColor(TXT))
         self.prof_fp.getAxis("bottom").setTextPen(pg.mkColor(DIM))
-        self.prof_fp.getAxis("left").setWidth(70)
+        self.prof_fp.getAxis("left").setWidth(74)
         self.prof_fp.setLabel("bottom", "volume BTC  (vente ◄ 0 ► achat)")
         self._prof_fp_items = []
-        right.addWidget(self.prof_fp, 6)
-        right.addWidget(self._h("SWEEPS EN CASCADE  (multi-niveaux < 0.8s)"))
-        self.cascade_text = QtWidgets.QTextEdit(); self.cascade_text.setReadOnly(True)
-        self.cascade_text.setStyleSheet(
-            f"QTextEdit{{background:{PANEL};border:1px solid {BORDER};"
-            f"border-radius:12px;color:{TXT};font-size:12px;padding:10px;}}")
-        right.addWidget(self.cascade_text, 2)
-        body.addLayout(right, 3)
+        self._prof_cells = {}
+        self._prof_bucket = 10.0
+        # croix + survol pour lire les chiffres exacts d'un niveau
+        self.prof_cross = pg.InfiniteLine(angle=0, movable=False,
+                                          pen=pg.mkPen((150, 160, 180, 120), width=1,
+                                                       style=QtCore.Qt.PenStyle.DashLine))
+        self.prof_cross.setZValue(40); self.prof_fp.addItem(self.prof_cross)
+        self.prof_fp.scene().sigMouseMoved.connect(self._prof_mouse)
+        outer.addWidget(self.prof_fp, 1)
+
+        # bandeau de lecture du niveau survolé
+        self.prof_hover = QtWidgets.QLabel("Survole un niveau du profil pour voir "
+                                           "prix · achat · vente · delta · total.")
+        self.prof_hover.setStyleSheet(
+            f"color:{TXT};font-size:13px;font-weight:700;background:{PANEL2};"
+            f"border:1px solid {BORDER};border-radius:8px;padding:8px 12px;")
+        outer.addWidget(self.prof_hover)
         return page
+
+    def _prof_mouse(self, pos):
+        """Survol du profil : affiche prix / achat / vente / delta / total du niveau."""
+        if not self._prof_cells:
+            return
+        vb = self.prof_fp.getViewBox()
+        if not self.prof_fp.sceneBoundingRect().contains(pos):
+            return
+        price = vb.mapSceneToView(pos).y()
+        bucket = self._prof_bucket or 10.0
+        lvl = round(price / bucket) * bucket
+        d = self._prof_cells.get(lvl)
+        if d is None:                        # cherche le niveau le plus proche
+            keys = list(self._prof_cells)
+            if not keys:
+                return
+            lvl = min(keys, key=lambda k: abs(k - price)); d = self._prof_cells[lvl]
+        self.prof_cross.setValue(lvl)
+        buy = d.get("buy", 0.0); sell = d.get("sell", 0.0); tot = buy + sell
+        delta = buy - sell
+        dcol = GREEN if delta >= 0 else RED
+        self.prof_hover.setText(
+            f"<span style='color:{VIOLET};font-weight:800;'>{lvl:,.0f} $</span>   "
+            f"<span style='color:{ACCENT};'>achat {buy:,.0f}</span> · "
+            f"<span style='color:{RED};'>vente {sell:,.0f}</span> · "
+            f"<span style='color:{dcol};font-weight:800;'>delta {delta:+,.0f}</span> · "
+            f"<span style='color:{TXT};'>total {tot:,.0f} BTC</span>")
 
     def _render_profile_fp(self, cells, poc, vah, val, lo, hi, bucket, mid, walls, title):
         """Dessine le PROFIL FOOTPRINT : barres divergentes vente(gauche)/achat(droite)
@@ -1573,24 +1600,66 @@ class Cockpit(QtWidgets.QMainWindow):
             plt.removeItem(it)
         self._prof_fp_items = []
         self.prof_fp_head.setText(title)
+        self._prof_cells = cells or {}
+        self._prof_bucket = bucket or 10.0
         if not cells:
             return
+        mode_delta = "Delta" in self.prof_mode_combo.currentText()
+        show_vals = self.prof_values_chk.isChecked()
         ys = sorted(cells.keys())
         buys = [cells[p].get("buy", 0.0) for p in ys]
         sells = [cells[p].get("sell", 0.0) for p in ys]
+        totals = [b + s for b, s in zip(buys, sells)]
         h = bucket * 0.86
+
         # value area (bande) en fond
         va = pg.LinearRegionItem(values=(val, vah), orientation="horizontal",
                                  movable=False, brush=(120, 120, 170, 26),
                                  pen=pg.mkPen((120, 120, 170, 60)))
         va.setZValue(-20); plt.addItem(va); self._prof_fp_items.append(va)
-        # barres divergentes : vente à gauche (rouge), achat à droite (bleu)
-        b_sell = pg.BarGraphItem(x0=[-s for s in sells], width=sells, y=ys, height=h,
-                                 brush=(205, 76, 88), pen=None)
-        b_buy = pg.BarGraphItem(x0=[0] * len(ys), width=buys, y=ys, height=h,
-                                brush=(58, 120, 195), pen=None)
-        plt.addItem(b_sell); plt.addItem(b_buy)
-        self._prof_fp_items += [b_sell, b_buy]
+
+        if mode_delta:
+            # DELTA NET par niveau : bleu si achat domine, rouge si vente domine
+            deltas = [b - s for b, s in zip(buys, sells)]
+            pos = [d if d > 0 else 0 for d in deltas]
+            neg = [d if d < 0 else 0 for d in deltas]
+            b_pos = pg.BarGraphItem(x0=[0] * len(ys), width=pos, y=ys, height=h,
+                                    brush=(58, 120, 195), pen=None)
+            b_neg = pg.BarGraphItem(x0=neg, width=[-n for n in neg], y=ys, height=h,
+                                    brush=(205, 76, 88), pen=None)
+            plt.addItem(b_neg); plt.addItem(b_pos)
+            self._prof_fp_items += [b_pos, b_neg]
+            span = max([abs(d) for d in deltas] + [1.0])
+        else:
+            # ACHAT × VENTE : vente à gauche (rouge), achat à droite (bleu)
+            b_sell = pg.BarGraphItem(x0=[-s for s in sells], width=sells, y=ys, height=h,
+                                     brush=(205, 76, 88), pen=None)
+            b_buy = pg.BarGraphItem(x0=[0] * len(ys), width=buys, y=ys, height=h,
+                                    brush=(58, 120, 195), pen=None)
+            plt.addItem(b_sell); plt.addItem(b_buy)
+            self._prof_fp_items += [b_sell, b_buy]
+            span = max(buys + [1.0])
+
+        # valeurs BTC sur les niveaux les plus volumineux
+        if show_vals and totals:
+            ranked = sorted(totals, reverse=True)[:14]
+            thr = ranked[-1] if ranked else 0
+            for p, b, s, t in zip(ys, buys, sells, totals):
+                if t < thr or t <= 0:
+                    continue
+                if mode_delta:
+                    d = b - s
+                    col = GREEN if d >= 0 else RED
+                    anchor = (0, 0.5) if d >= 0 else (1, 0.5)
+                    xx = d + (span * 0.012 if d >= 0 else -span * 0.012)
+                    lab = f"{d:+,.0f}"
+                else:
+                    col, anchor, xx, lab = TXT, (0, 0.5), b + span * 0.012, f"{t:,.0f}"
+                txt = pg.TextItem(html=f"<span style='font-size:7pt;color:{col};"
+                                       f"font-weight:700;'>{lab}</span>", anchor=anchor)
+                txt.setPos(xx, p)
+                plt.addItem(txt); self._prof_fp_items.append(txt)
+
         # POC (niveau le plus tradé) — aimant
         pl = pg.InfiniteLine(pos=poc, angle=0, pen=pg.mkPen(VIOLET, width=2),
                              label=f"POC {poc:,.0f}",
@@ -1605,53 +1674,57 @@ class Cockpit(QtWidgets.QMainWindow):
                                  labelOpts={"color": "#0d1117", "fill": (0, 229, 255, 230),
                                             "position": 0.98})
             plt.addItem(ml); self._prof_fp_items.append(ml)
-        # murs (gros ordres actuels) marqués dans la fenêtre du profil
-        maxbuy = max(buys) if buys else 1
+        # murs (gros ordres actuels) marqués à leur niveau de prix
+        wall_x = span * 1.04
         for w in walls:
             wp = w.get("price")
             if wp is None or not (lo <= wp <= hi):
                 continue
-            is_bid = w.get("side") == "bid"
-            col = GREEN if is_bid else RED
+            col = GREEN if w.get("side") == "bid" else RED
             wl = pg.InfiniteLine(pos=wp, angle=0,
                                  pen=pg.mkPen(col, width=1, style=QtCore.Qt.PenStyle.DotLine))
             plt.addItem(wl); self._prof_fp_items.append(wl)
-            txt = pg.TextItem(f"🧱 {w.get('qty', 0):.0f}", color=col, anchor=(0, 0.5))
-            txt.setPos(maxbuy * 1.02, wp)
+            txt = pg.TextItem(html=f"<span style='font-size:8pt;color:{col};"
+                                   f"font-weight:700;'>🧱 {w.get('qty', 0):.0f}</span>",
+                              anchor=(0, 0.5))
+            txt.setPos(wall_x, wp)
             plt.addItem(txt); self._prof_fp_items.append(txt)
         pad = (hi - lo) * 0.04 + bucket
         plt.setYRange(lo - pad, hi + pad, padding=0)
 
-    def _refresh_profil(self):
+    def _refresh_profil(self, *args):
         import time as _t, threading
         mid = self._last_state.get("mid") if self._last_state else None
         if not hasattr(self, "_profL"):
             self._profL = {}; self._profL_loading = set()
 
         label = self.prof_window_combo.currentText()
+        res = self.prof_res_combo.currentText()
+        tgt_levels, bucket_short = self.PROF_RES.get(res, (110, 10.0))
         long_mode = label in self.PROF_WINDOWS_LONG
         vp = None
         if long_mode:
             interval, limit = self.PROF_WINDOWS_LONG[label]
-            entry = self._profL.get(label)
+            ckey = (label, res)
+            entry = self._profL.get(ckey)
             fresh = entry and (_t.time() - entry[0] < 180)
-            if not fresh and label not in self._profL_loading:
-                self._profL_loading.add(label)
+            if not fresh and ckey not in self._profL_loading:
+                self._profL_loading.add(ckey)
 
-                def _load(lbl=label, iv=interval, lm=limit):
+                def _load(k=ckey, iv=interval, lm=limit, tl=tgt_levels):
                     try:
-                        data = self.engine.get_profile_klines(interval=iv, limit=lm)
+                        data = self.engine.get_profile_klines(interval=iv, limit=lm, target_levels=tl)
                     except Exception:
                         data = None
-                    self._profL[lbl] = (_t.time(), data)
-                    self._profL_loading.discard(lbl)
+                    self._profL[k] = (_t.time(), data)
+                    self._profL_loading.discard(k)
                 threading.Thread(target=_load, daemon=True).start()
             vp = entry[1] if entry else None
             if vp is None:
                 self.prof_fp_head.setText(f"PROFIL FOOTPRINT · {label} · chargement des klines Binance…")
         else:
             window_s = self.PROF_WINDOWS.get(label, 3600)
-            vp = self.engine.get_volume_profile(window_s=window_s)
+            vp = self.engine.get_volume_profile(window_s=window_s, bucket=bucket_short)
 
         if vp:
             poc = vp["poc"]
@@ -1680,31 +1753,6 @@ class Cockpit(QtWidgets.QMainWindow):
         else:
             for w in (self.pf_poc, self.pf_vah, self.pf_val, self.pf_va, self.pf_vol):
                 w._val.setText("—")
-
-        # Cascade Sweeps
-        cascades = self.engine.get_cascade_sweeps(window_s=120)
-        if not cascades:
-            self._hset(self.cascade_text,
-                f"<span style='color:{DIM};'>Aucun sweep en cascade récent (2 dernières minutes).<br>"
-                "Un sweep en cascade = série de trades agressifs du même côté sur 3+ niveaux "
-                "en moins de 0.8 seconde. C'est souvent le signe d'un acteur qui veut "
-                "prendre position rapidement — signal directionnel fort.</span>")
-        else:
-            html = []
-            for c in cascades:
-                col = RED if c["is_sell"] else GREEN
-                dot = "▼" if c["is_sell"] else "▲"
-                html.append(
-                    f"<div style='margin-bottom:12px;'>"
-                    f"<span style='color:{DIM};'>{c['ts']}</span> "
-                    f"<span style='color:{col};font-weight:800;font-size:14px;'>"
-                    f"{dot} SWEEP {c['side']}</span><br>"
-                    f"<span style='color:{TXT};'>{c['qty']:.2f} BTC  ·  "
-                    f"{c['levels']} niveaux touchés  ·  range {c['range']:.0f}$  ·  "
-                    f"~{c['usd']:,}$</span><br>"
-                    f"<span style='color:{DIM};font-style:italic;'>Prix balayés : "
-                    f"{c['lo']:,.0f} → {c['hi']:,.0f}  ({c['n_trades']} trades en &lt;0.8s)</span></div>")
-            self._hset(self.cascade_text, "".join(html))
 
     def _hm_zoom(self, mult):
         z = self.engine.hm_zoom * mult
