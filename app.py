@@ -22,44 +22,12 @@ import pyqtgraph as pg
 
 from engine import OrderFlowEngine, VENUES, N_VENUES
 from analysis import SlowAnalyzer
-
-
-# TradingView intégré (nécessite PyQt6-WebEngine ; import AVANT QApplication)
-try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    HAS_WEBENGINE = True
-except ImportError:
-    HAS_WEBENGINE = False
+from paths import app_dir, data_file
 
 
 class Bridge(QtCore.QObject):
     state = QtCore.pyqtSignal(dict)
     journal_closed = QtCore.pyqtSignal()   # rattrapage hors-ligne -> refresh UI
-
-
-TRADINGVIEW_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>html,body{margin:0;padding:0;height:100%;background:#0a0d12;}</style>
-</head><body>
-<div id="tv" style="height:100vh;width:100%;"></div>
-<script src="https://s3.tradingview.com/tv.js"></script>
-<script>
-new TradingView.widget({
-  container_id: "tv",
-  autosize: true,
-  symbol: "BINANCE:BTCUSDT.P",
-  interval: "1",
-  timezone: "Etc/UTC",
-  theme: "dark",
-  style: "1",
-  locale: "fr",
-  hide_side_toolbar: false,
-  allow_symbol_change: true,
-  withdateranges: true,
-  studies: ["VWAP@tv-basicstudies", "Volume@tv-basicstudies"]
-});
-</script>
-</body></html>"""
 
 
 BG="#0a0d12"; PANEL="#10151e"; PANEL2="#151b26"; BORDER="#1d2531"
@@ -2181,7 +2149,7 @@ class Cockpit(QtWidgets.QMainWindow):
     # ---- persistance des réglages du calculateur (capital, risque, stop, sens) ----
     def _calc_settings_path(self):
         import os
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "calc_settings.json")
+        return data_file("calc_settings.json")
 
     def _calc_load_settings(self):
         import json, os
@@ -2270,7 +2238,7 @@ class Cockpit(QtWidgets.QMainWindow):
 
     def _journal_path(self):
         import os
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
+        return data_file("trade_journal.json")
 
     def _journal_load(self):
         import json, os
@@ -2642,7 +2610,7 @@ class Cockpit(QtWidgets.QMainWindow):
 
     def _alerts_cfg_path(self):
         import os
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "alerts_config.json")
+        return data_file("alerts_config.json")
 
     def _alerts_default_cfg(self):
         return {"enabled": False, "channel": "ntfy",
@@ -4280,7 +4248,7 @@ class Cockpit(QtWidgets.QMainWindow):
     def _exec_load_levels(self):
         try:
             import os
-            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mes_niveaux.txt")
+            p = data_file("mes_niveaux.txt")
             with open(p, encoding="utf-8") as f:
                 import re
                 return [float(x) for x in re.findall(r"\d+(?:\.\d+)?", f.read())]
@@ -4299,7 +4267,7 @@ class Cockpit(QtWidgets.QMainWindow):
             except ValueError:
                 pass
         self._manual_levels = sorted(set(vals))
-        d = os.path.dirname(os.path.abspath(__file__))
+        d = app_dir()
         try:
             with open(os.path.join(d, "mes_niveaux.txt"), "w", encoding="utf-8") as f:
                 f.write(", ".join(f"{x:.0f}" for x in self._manual_levels))

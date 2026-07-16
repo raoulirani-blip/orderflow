@@ -18,7 +18,8 @@ import json
 import time
 import threading
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
+from paths import app_dir
+_DIR = app_dir()
 BUDGET_FILE = os.path.join(_DIR, "ai_budget.json")
 KEY_FILE = os.path.join(_DIR, "claude_key.txt")
 

@@ -18,6 +18,7 @@ import statistics
 from collections import deque, defaultdict
 
 from connectors import CONNECTORS
+from paths import data_file
 
 
 VENUES = ["binance", "okx", "bybit", "hyperliquid"]
@@ -109,8 +110,7 @@ class OrderFlowEngine:
         from wall_history import WallHistory
         self.wall_history = WallHistory()
         # persistance de l'historique des murs (survit aux redémarrages)
-        self._wall_state_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "wall_state.json")
+        self._wall_state_path = data_file("wall_state.json")
         n = self.wall_history.load(self._wall_state_path)
         if n:
             self._log("MURS", f"Historique des murs rechargé : {n} niveaux repris.")
@@ -119,8 +119,7 @@ class OrderFlowEngine:
         # persistance des LIQUIDATIONS : Bybit ne redonne PAS l'historique, donc on
         # garde le nôtre sur disque -> vrai 24/7 côté serveur (survit aux redémarrages
         # de l'auto-update) ET plus de reset à zéro en local à chaque relance.
-        self._liq_state_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "liq_state.json")
+        self._liq_state_path = data_file("liq_state.json")
         self._load_liqs()
         self._last_liq_save = time.time()
 
