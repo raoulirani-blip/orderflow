@@ -3686,6 +3686,27 @@ class Cockpit(QtWidgets.QMainWindow):
         intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
 
+        # sélecteur de fenêtre de temps des graphiques
+        zrow = QtWidgets.QHBoxLayout(); zrow.setSpacing(8)
+        zlbl = QtWidgets.QLabel("FENÊTRE DES GRAPHIQUES :")
+        zlbl.setStyleSheet(f"color:{DIM};font-size:11px;font-weight:700;letter-spacing:0.5px;")
+        zrow.addWidget(zlbl)
+        self.ZS_WINDOWS = {"15 min": 15, "1 h": 60, "3 h": 180, "6 h": 360,
+                           "12 h": 720, "24 h": 1440, "Tout": None}
+        self.zs_win_combo = QtWidgets.QComboBox()
+        self.zs_win_combo.addItems(list(self.ZS_WINDOWS.keys()))
+        self.zs_win_combo.setCurrentText("3 h")
+        self.zs_win_combo.setStyleSheet(
+            f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
+            f"color:{TXT};padding:6px 12px;font-weight:700;}}")
+        self.zs_win_combo.currentIndexChanged.connect(self._refresh_zscores)
+        zrow.addWidget(self.zs_win_combo)
+        znote = QtWidgets.QLabel("· s'applique à tous les graphiques (agresseurs, CVD, tape…) "
+                                 "· les bandes ±2σ s'adaptent à la fenêtre")
+        znote.setStyleSheet(f"color:{DIM};font-size:11px;")
+        zrow.addWidget(znote); zrow.addStretch()
+        outer.addLayout(zrow)
+
         # tableau récapitulatif multi-échelles
         cols = ["Métrique", "Valeur", "z 15min", "z 1h", "z 3h", "Lecture"]
         self.zs_table = QtWidgets.QTableWidget(len(self.ZS_METRICS), len(cols))
@@ -3719,7 +3740,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self._zs_timer.start(5000)
         return page
 
-    def _refresh_zscores(self):
+    def _refresh_zscores(self, *args):
         buf = list(self._zs_buf)
         if len(buf) < 6:
             return
@@ -3771,14 +3792,22 @@ class Cockpit(QtWidgets.QMainWindow):
                     f = it.font(); f.setBold(True); it.setFont(f)
                 self.zs_table.setItem(i, j, it)
 
-        # graphiques : valeur brute + moyenne ±2σ (fenêtre 1h)
+        # fenêtre choisie par l'utilisateur (en minutes ; None = tout l'historique)
+        win_min = self.ZS_WINDOWS.get(self.zs_win_combo.currentText(), 180)
+        # graphiques : valeur brute + moyenne ±2σ, calculées sur la fenêtre visible
         for mname, (plt, curve, mean_l, up_l, dn_l) in self.zs_plots.items():
-            vals = [x.get(mname, 0.0) for x in buf]
             xs = [(x["t"] - now) / 60.0 for x in buf]          # minutes (négatif → 0)
+            vals = [x.get(mname, 0.0) for x in buf]
             curve.setData(xs, vals)
-            sub = np.asarray(vals[-720:], dtype=float)
+            # échantillons dans la fenêtre visible (pour la moyenne et les bandes)
+            vis = [v for v, xm in zip(vals, xs) if win_min is None or xm >= -win_min]
+            sub = np.asarray(vis if len(vis) >= 3 else vals, dtype=float)
             m, sd = float(sub.mean()), float(sub.std())
             mean_l.setValue(m); up_l.setValue(m + 2 * sd); dn_l.setValue(m - 2 * sd)
+            if win_min is None:
+                plt.enableAutoRange(axis="x")
+            else:
+                plt.setXRange(-win_min, win_min * 0.02, padding=0)
 
     # ===========================================================
     # PAGE 8 — NEWS CRYPTO + GUIDE MACRO
