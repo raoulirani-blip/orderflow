@@ -3852,12 +3852,15 @@ class Cockpit(QtWidgets.QMainWindow):
         top.addWidget(combo)
         lay.addLayout(top)
 
-        plt = pg.PlotWidget(); plt.setBackground(BG)
-        plt.showGrid(x=False, y=True, alpha=0.12)
+        # axe de temps réel (heures:minutes) -> l'utilisateur zoome/déplace librement
+        axis = pg.DateAxisItem(orientation="bottom")
+        plt = pg.PlotWidget(axisItems={"bottom": axis}); plt.setBackground(BG)
+        plt.showGrid(x=True, y=True, alpha=0.12)
         plt.getAxis("left").setTextPen(pg.mkPen(TXT))
         plt.getAxis("bottom").setTextPen(pg.mkPen(DIM))
-        plt.setLabel("bottom", "minutes (0 = maintenant)")
-        curve = plt.plot([], [], pen=pg.mkPen("#4da3ff", width=1.6))
+        plt.setMouseEnabled(x=True, y=True)          # molette = zoom, glisser = déplacer
+        # vraies données brutes, aucun lissage (représentatif des vrais niveaux)
+        curve = plt.plot([], [], pen=pg.mkPen("#4da3ff", width=1.4))
         mean_l = plt.addLine(y=0, pen=pg.mkPen("#8a94a6", width=1))
         up_l = plt.addLine(y=0, pen=pg.mkPen("#f5c518", width=1, style=QtCore.Qt.PenStyle.DashLine))
         dn_l = plt.addLine(y=0, pen=pg.mkPen("#f5c518", width=1, style=QtCore.Qt.PenStyle.DashLine))
@@ -3868,33 +3871,58 @@ class Cockpit(QtWidgets.QMainWindow):
         lay.addWidget(info)
 
         def redraw(*_):
+            """Met à jour SEULEMENT les données + bandes + info. NE TOUCHE PAS à la vue
+            (zoom/déplacement) -> l'utilisateur reste maître de la souris."""
             buf = sorted(self._zs_buf, key=lambda x: x.get("t", 0))
             if len(buf) < 3:
                 return
-            now = buf[-1]["t"]
-            xs = [(x["t"] - now) / 60.0 for x in buf]
+            ts = [x.get("t", 0) for x in buf]                 # temps ABSOLU (secondes)
             vals = [x.get(metric, 0.0) for x in buf]
-            curve.setData(xs, vals)
-            win = self.ZS_WINDOWS.get(combo.currentText(), 180)
-            vis = [v for v, xm in zip(vals, xs) if win is None or xm >= -win]
+            curve.setData(ts, vals)
+            # moyenne / ±2σ calculées sur ce qui est VISIBLE à l'écran (s'adapte au zoom)
+            (x0, x1), _ = plt.getViewBox().viewRange()
+            vis = [v for t, v in zip(ts, vals) if x0 <= t <= x1]
             sub = np.asarray(vis if len(vis) >= 3 else vals, dtype=float)
             m, sd = float(sub.mean()), float(sub.std())
             mean_l.setValue(m); up_l.setValue(m + 2 * sd); dn_l.setValue(m - 2 * sd)
-            if win is None:
-                plt.enableAutoRange(axis="x")
-            else:
-                plt.setXRange(-win, win * 0.02, padding=0)
             z = (vals[-1] - m) / sd if sd > 1e-9 else 0.0
             zc = RED if abs(z) >= 3 else (AMBER if abs(z) >= 2 else TXT)
             info.setText(f"Actuel : {vals[-1]:.2f}   ·   moyenne {m:.2f}   ·   "
                          f"±2σ [{m - 2 * sd:.2f} ; {m + 2 * sd:.2f}]   ·   "
                          f"<span style='color:{zc};'>z = {z:+.1f}</span>   ·   "
-                         f"{len(vis)} points sur la fenêtre")
+                         f"{len(vis)} points visibles")
 
-        combo.currentIndexChanged.connect(redraw)
+        def jump_window(*_):
+            """Le combo est un RACCOURCI : il cadre sur la fenêtre choisie, puis tu
+            reprends la main à la souris (zoom molette, glisser gauche/droite)."""
+            win = self.ZS_WINDOWS.get(combo.currentText(), 180)
+            now = _t_now()
+            if win is None:
+                plt.enableAutoRange(axis="x")
+            else:
+                plt.setXRange(now - win * 60, now, padding=0.02)
+            plt.enableAutoRange(axis="y")
+            redraw()
+
+        import time as _time_mod
+        def _t_now():
+            b = self._zs_buf
+            return b[-1].get("t", _time_mod.time()) if b else _time_mod.time()
+
+        combo.currentIndexChanged.connect(jump_window)
+        # bouton pour recadrer si on s'est perdu dans le zoom
+        reset = QtWidgets.QPushButton("⟲ Recadrer")
+        reset.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        reset.setStyleSheet(
+            f"QPushButton{{background:{PANEL};color:{TXT};border:1px solid {BORDER};"
+            f"border-radius:8px;padding:6px 12px;font-weight:700;}}"
+            f"QPushButton:hover{{border:1px solid {ACCENT};color:{ACCENT};}}")
+        reset.clicked.connect(jump_window)
+        top.addWidget(reset)
+
         timer = QtCore.QTimer(dlg); timer.timeout.connect(redraw); timer.start(2000)
-        redraw()
-        self._zs_detail_dlgs.append(dlg)          # garde une référence (non-modal)
+        jump_window()                              # cadrage initial, puis souris libre
+        self._zs_detail_dlgs.append(dlg)           # garde une référence (non-modal)
         dlg.finished.connect(lambda *_: self._zs_detail_dlgs.remove(dlg)
                              if dlg in self._zs_detail_dlgs else None)
         dlg.show()
