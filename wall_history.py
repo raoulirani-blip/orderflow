@@ -67,8 +67,19 @@ class WallRecord:
 
 
 class WallHistory:
-    def __init__(self, retention_s=3700, break_margin=15.0):
+    # --- mémoire LONG TERME : uniquement les murs qui comptent, gardés des semaines ---
+    LONG_MIN_QTY = 25.0        # un mur de cette taille (BTC) est notable en soi
+    LONG_ICE_MIN = 5.0         # volume absorbé mini pour parler d'iceberg
+
+    def __init__(self, retention_s=3700, break_margin=15.0,
+                 long_retention_s=21 * 24 * 3600):
         self.retention_s = retention_s          # keep ~1h+ of wall lives
+        # HISTORIQUE LONG : le carnet n'a AUCUN historique public, donc la seule façon
+        # d'avoir les niveaux des semaines passées est de les enregistrer nous-mêmes.
+        # On ne garde QUE les murs significatifs (testés / gros / icebergs) — jamais le
+        # bruit (spoofs, petits murs jamais touchés) — sinon le fichier explose.
+        self.long_retention_s = long_retention_s
+        self.longterm = deque(maxlen=30000)      # (ts_closed, WallRecord) significatifs
         # INVALIDATION : un mur est "cassé/invalidé" dès que le prix le TRAVERSE de
         # plus de break_margin dollars (résistance : prix > mur+marge ; support :
         # prix < mur-marge). Marge réglable en dollars.
@@ -113,12 +124,32 @@ class WallHistory:
                     elif rec.lifespan < 3.0 and abs(rec.last_price_rel or 1e9) > rec.price * 0.0003:
                         rec.pulled = True        # retiré vite, prix loin = spoof
                     self.closed.append((now, rec))
+                    if self._is_significant(rec):     # -> mémoire longue (semaines)
+                        self.longterm.append((now, rec))
                     self.active.pop(key, None)
+
+        # purge de la mémoire longue (semaines)
+        lcut = now - self.long_retention_s
+        while self.longterm and self.longterm[0][1].last_seen < lcut:
+            self.longterm.popleft()
 
         # purge very old closed records
         cutoff = now - self.retention_s
         while self.closed and self.closed[0][0] < cutoff:
             self.closed.popleft()
+
+    def _is_significant(self, rec):
+        """Ce mur mérite-t-il d'être gardé des SEMAINES ? On garde ce qui fait un vrai
+        niveau : testé (donc validé ou cassé), iceberg, ou gros. On jette le bruit :
+        spoofs et petits murs jamais touchés — sinon le fichier explose."""
+        if rec.pulled:
+            return False                          # spoof = bruit, jamais gardé
+        if rec.tests >= 1:
+            return True                           # le prix est venu le tester = vrai niveau
+        if (rec.absorbed >= self.LONG_ICE_MIN
+                and rec.absorbed >= 1.5 * max(rec.max_qty, 1e-9)):
+            return True                           # iceberg : a absorbé sans céder
+        return rec.max_qty >= self.LONG_MIN_QTY   # gros mur
 
     def peak_near(self, price, tol=8.0):
         """Retourne (pic BTC, taille actuelle BTC) du mur suivi le plus proche de
@@ -140,19 +171,19 @@ class WallHistory:
         return best.max_qty
 
     def _records_in_window(self, minutes):
-        """All wall records (active + closed) that were alive within the window."""
+        """Murs vivants dans la fenêtre. Fenêtre COURTE (<= rétention ~1h) : tout
+        (active + closed). Fenêtre LONGUE (jours/semaines) : active + mémoire longue
+        (= uniquement les murs significatifs) — pas de doublon, `closed` n'est pas relu."""
         now = time.time()
         window_start = now - minutes * 60
-        recs = []
-        for rec in self.active.values():
-            if rec.last_seen >= window_start:
-                recs.append(rec)
-        for ts_closed, rec in self.closed:
+        recs = [rec for rec in self.active.values() if rec.last_seen >= window_start]
+        source = self.closed if minutes * 60 <= self.retention_s else self.longterm
+        for _ts, rec in source:
             if rec.last_seen >= window_start:
                 recs.append(rec)
         return recs
 
-    def report(self, minutes, mid=None, top_n=8, max_dist=None):
+    def report(self, minutes, mid=None, top_n=8, max_dist=None, cluster=0.1):
         recs = self._records_in_window(minutes)
         # filtre distance : ne garder que les murs à moins de max_dist $ du prix
         # (pour se concentrer sur les niveaux proches et actionnables)
@@ -165,9 +196,12 @@ class WallHistory:
         # (mur qui clignote : apparaît → disparaît >1.5s → réapparaît = nouveau record).
         # Sans ça, le même niveau s'affiche en 2-3 lignes identiques. On fusionne en UN
         # record : pic max, somme des tests, durée totale, ÉTAT LE PLUS RÉCENT.
+        # `cluster` = largeur de la zone de regroupement en $. 0.1 = au prix exact
+        # (fenêtres courtes) ; 25 = par zone (fenêtres longues), pour qu'un niveau
+        # défendu 7 fois en 2 semaines ressorte comme UN niveau et pas 7 voisins.
         groups = {}
         for r in recs:
-            groups.setdefault((round(r.price, 1), r.side), []).append(r)
+            groups.setdefault((round(r.price / cluster) * cluster, r.side), []).append(r)
 
         def _merge(group):
             if len(group) == 1:
@@ -295,6 +329,8 @@ class WallHistory:
                 "saved_at": time.time(),
                 "active": [self._rec_to_dict(r) for r in self.active.values()],
                 "closed": [(ts, self._rec_to_dict(r)) for ts, r in self.closed],
+                # mémoire longue : les niveaux significatifs des dernières semaines
+                "longterm": [(ts, self._rec_to_dict(r)) for ts, r in self.longterm],
             }
             tmp = path + ".tmp"
             with open(tmp, "w") as f:
@@ -328,6 +364,14 @@ class WallHistory:
                 if d["last_seen"] >= cutoff:
                     rec = self._dict_to_rec(d)
                     self.active[(round(rec.price, 1), rec.side)] = rec; n += 1
+            except (KeyError, TypeError):
+                continue
+        # mémoire longue : rétention BEAUCOUP plus large (semaines)
+        lcut = time.time() - self.long_retention_s
+        for ts, d in data.get("longterm", []):
+            try:
+                if d["last_seen"] >= lcut:
+                    self.longterm.append((ts, self._dict_to_rec(d))); n += 1
             except (KeyError, TypeError):
                 continue
         return n

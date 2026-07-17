@@ -368,7 +368,12 @@ class Cockpit(QtWidgets.QMainWindow):
             f"QTabBar::tab:selected{{background:{VIOLET};color:#0c0716;}}")
         outer.addWidget(self.wall_tabs, 1)
 
-        self.WALL_WINDOWS = [1, 5, 15, 30, 60]
+        # fenêtres courtes (minutes) + fenêtres LONGUES (mémoire longue : uniquement
+        # les niveaux significatifs — validés, gros, icebergs — enregistrés au fil du temps)
+        self.WALL_WINDOWS = [1, 5, 15, 30, 60, 1440, 10080, 20160]
+        self.WALL_WIN_LABELS = {1: "1 min", 5: "5 min", 15: "15 min", 30: "30 min",
+                                60: "60 min", 1440: "1 jour", 10080: "1 semaine",
+                                20160: "2 semaines"}
         self.wall_widgets = {}
         for m in self.WALL_WINDOWS:
             wp = QtWidgets.QWidget()
@@ -422,7 +427,7 @@ class Cockpit(QtWidgets.QMainWindow):
             sub.addTab(flux, "  💰  EXÉCUTÉ / EN ATTENTE  ")
             pl.addWidget(sub, 1)
 
-            self.wall_tabs.addTab(wp, f"  {m} min  ")
+            self.wall_tabs.addTab(wp, f"  {self.WALL_WIN_LABELS.get(m, str(m) + ' min')}  ")
             self.wall_widgets[m] = {"header": header, "longest": longest, "catbar": catbar,
                                     "table": table, "solid": solid, "valid": valid,
                                     "broken": broken, "flux": flux}
@@ -883,7 +888,7 @@ class Cockpit(QtWidgets.QMainWindow):
             mm, ss = divmod(remain, 60)
             last = w.get("_last_update_str", "—")
             w["header"].setText(
-                f"🕒 Fenêtre {m} min   ·   dernière mise à jour : {last}   ·   "
+                f"🕒 Fenêtre {self.WALL_WIN_LABELS.get(m, str(m)+chr(32)+'min')}   ·   dernière mise à jour : {last}   ·   "
                 f"prochaine dans {mm:02d}:{ss:02d}")
 
     def _refresh_walls(self):
@@ -895,7 +900,11 @@ class Cockpit(QtWidgets.QMainWindow):
             # pool plus large si l'utilisateur trie autrement que par importance
             sort_key = self.WALL_SORTS.get(self.wall_sort_combo.currentText())
             pool = 40 if sort_key else 18
-            rep = self.engine.wall_history.report(m, mid=mid, top_n=pool, max_dist=max_dist)
+            # fenêtres longues (jours/semaines) : on regroupe par ZONE de 25 $ pour
+            # qu'un niveau défendu plusieurs fois ressorte comme UN seul niveau fort
+            cluster = 25.0 if m >= 1440 else 0.1
+            rep = self.engine.wall_history.report(m, mid=mid, top_n=pool,
+                                                  max_dist=max_dist, cluster=cluster)
             if rep.get("ready") and sort_key == "dist" and mid:
                 # proximité : le plus proche du prix actuel en premier (croissant)
                 rep["top"] = sorted(rep["top"],
@@ -905,9 +914,10 @@ class Cockpit(QtWidgets.QMainWindow):
                                     reverse=True)[:18]
             if not rep.get("ready"):
                 dtxt = self.wall_dist_combo.currentText()
-                msg = (f"🧱 Fenêtre {m} min — aucun mur à {dtxt} du prix. "
+                lbl = self.WALL_WIN_LABELS.get(m, f"{m} min")
+                msg = (f"🧱 {lbl} — aucun mur à {dtxt} du prix. "
                        f"Élargis la distance en haut." if max_dist else
-                       f"🧱 Fenêtre {m} min — accumulation des murs…")
+                       f"🧱 {lbl} — accumulation des murs…")
                 w["header"].setText(f"{msg}  ({_t.strftime('%H:%M:%S')})")
                 # vide les tableaux
                 for key in ("table", "solid", "valid", "broken", "flux"):
@@ -915,7 +925,7 @@ class Cockpit(QtWidgets.QMainWindow):
                 w["_top_walls"] = []
                 continue
             w["header"].setText(
-                f"🧱 Fenêtre {m} min   ·   {rep['n_total']} murs vus "
+                f"🧱 {self.WALL_WIN_LABELS.get(m, str(m)+chr(32)+'min')}   ·   {rep['n_total']} niveaux "
                 f"({rep['n_buy']} support / {rep['n_sell']} résistance)   ·   "
                 f"{rep['n_spoof']} spoof   ·    🧊 {rep.get('n_iceberg', 0)} iceberg   ·   "
                 f"maj {_t.strftime('%H:%M:%S')}")
