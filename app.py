@@ -3557,8 +3557,39 @@ class Cockpit(QtWidgets.QMainWindow):
             "Funding %": f.get("rate_pct", 0.0) or 0.0,
             "Instit Δ5min": seg["inst"]["delta"] if seg else 0.0,
         })
+        # sauvegarde de l'historique toutes les ~60 s (survit aux redémarrages)
+        if _t.time() - getattr(self, "_zs_last_save", 0) > 60:
+            self._zs_last_save = _t.time()
+            self._zs_save()
         if self.tabs.currentWidget() is getattr(self, "_zs_page", None):
             self._refresh_zscores()
+
+    def _zs_path(self):
+        return data_file("zscore_history.json")
+
+    def _zs_load(self):
+        """Recharge l'historique des métriques (agresseurs, CVD, tape…) au lancement."""
+        import json, os, time as _t
+        p = self._zs_path()
+        if not os.path.exists(p):
+            return
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        cut = _t.time() - 24 * 3600
+        for x in data:
+            if isinstance(x, dict) and x.get("t", 0) >= cut:
+                self._zs_buf.append(x)
+
+    def _zs_save(self):
+        import json
+        try:
+            with open(self._zs_path(), "w", encoding="utf-8") as f:
+                json.dump(list(self._zs_buf), f)
+        except OSError:
+            pass
 
     @staticmethod
     def _zscore(vals):
@@ -3568,7 +3599,10 @@ class Cockpit(QtWidgets.QMainWindow):
 
     def _build_zscore_page(self):
         from collections import deque
-        self._zs_buf = deque(maxlen=2160)          # 3 h à 5 s
+        # historique PERSISTANT : 24 h à 5 s, sauvegardé sur disque -> ne se vide plus
+        # à chaque redémarrage (avant : 3 h en mémoire, perdu à chaque lancement)
+        self._zs_buf = deque(maxlen=17280)         # 24 h à 5 s
+        self._zs_load()
         page = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(page)
         outer.setContentsMargins(14, 14, 14, 14); outer.setSpacing(10)
@@ -3645,7 +3679,7 @@ class Cockpit(QtWidgets.QMainWindow):
             vals = [x[mname] for x in buf]
             cur = vals[-1]
             zz = {}
-            for scale, nsamp in (("15min", 180), ("1h", 720), ("3h", len(vals))):
+            for scale, nsamp in (("15min", 180), ("1h", 720), ("3h", 2160)):
                 sub = vals[-nsamp:]
                 zz[scale] = self._zscore(sub) if len(sub) >= 24 else None
             worst = max((abs(v) for v in zz.values() if v is not None), default=0)
@@ -4475,6 +4509,10 @@ class Cockpit(QtWidgets.QMainWindow):
 
     def closeEvent(self,e):
         self.newsfeed.stop()
+        try:
+            self._zs_save()          # sauvegarde finale de l'historique des métriques
+        except Exception:
+            pass
         try:
             self.quant.stop()
         except Exception:

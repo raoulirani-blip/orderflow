@@ -6,6 +6,7 @@ wall_state.json
 liq_state.json
 calc_settings.json
 trade_journal.json
+zscore_history.json
 mes_niveaux.txt
 server.log
 

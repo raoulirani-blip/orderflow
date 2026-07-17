@@ -205,6 +205,7 @@ class AlertServer:
                 {"command": "niveaux", "description": "Définir tes niveaux (ex: 61000, 63000)"},
                 {"command": "proximite", "description": "Distance d'alerte en $ (ex: 100)"},
                 {"command": "liquidations", "description": "Zones de liquidation enregistrées 24/7 (aimants)"},
+                {"command": "murs", "description": "Niveaux forts enregistrés 24/7 (2 dernières semaines)"},
                 {"command": "update", "description": "Mettre à jour le serveur maintenant"},
                 {"command": "aide", "description": "Liste des commandes"},
             ])
@@ -235,6 +236,8 @@ class AlertServer:
             return self._cmd_update()
         if low.startswith("/liq"):
             return self._cmd_liquidations()
+        if low.startswith("/mur") or low.startswith("/niveauxforts") or low.startswith("/wall"):
+            return self._cmd_murs_forts()
         if low in ("/aide", "/help", "/start", "aide"):
             return ("🤖 Copilote Order Flow — commandes :\n"
                     "/live — TOUTES les données en direct (prix, CVD, murs, VWAP, POC…)\n"
@@ -242,6 +245,7 @@ class AlertServer:
                     "/niveaux 61000, 62000 — définir tes niveaux surveillés\n"
                     "/proximite 100 — distance d'alerte (à combien de $ ça te prévient)\n"
                     "/liquidations — zones de liquidation enregistrées 24/7 (aimants)\n"
+                    "/murs — niveaux forts (murs) enregistrés 24/7 sur les 2 dernières semaines\n"
                     "/update — récupérer la dernière version du code\n"
                     "\n…ou pose une question libre (« je short ici ? ») → le copilote analyse.")
         # --- sinon : question libre au copilote ---
@@ -260,6 +264,38 @@ class AlertServer:
                 f"Niveaux surveillés : {lv}\n"
                 f"Fenêtre : {self.cfg.get('start_h')}h–{self.cfg.get('end_h')}h\n"
                 f"Alertes : {'ON' if self.cfg.get('enabled') else 'OFF'}")
+
+    def _cmd_murs_forts(self):
+        """Niveaux forts (murs significatifs) enregistrés 24/7 sur les 2 dernières
+        semaines — regroupés par zone. Le carnet n'a pas d'historique public : c'est le
+        serveur qui les accumule en continu, même quand le PC est éteint."""
+        s = self.state or {}
+        mid = s.get("mid")
+        rep = self.engine.wall_history.report(20160, mid=mid, top_n=40,
+                                              max_dist=None, cluster=25.0)
+        if not rep.get("ready"):
+            return ("🧱 NIVEAUX FORTS (2 semaines)\n\nPas encore de niveau enregistré — "
+                    "le serveur accumule au fil du temps (reviens dans quelques jours).")
+        # les plus tenaces : d'abord testés/tenus, puis les plus proches du prix
+        walls = [w for w in rep["top"] if w.get("tests", 0) >= 1 or w.get("iceberg")]
+        walls.sort(key=lambda w: (-(w.get("tests", 0)),
+                                  abs(w["price"] - mid) if mid else 0))
+        lines = ["🧱 NIVEAUX FORTS — 2 semaines (enregistrés 24/7)"]
+        if mid:
+            lines.append(f"Prix : {mid:,.0f}$")
+        lines.append("")
+        for w in walls[:12]:
+            cote = "support" if w["side"] == "bid" else "résistance"
+            dist = f" ({w['price'] - mid:+.0f}$)" if mid else ""
+            ice = " 🧊ICEBERG" if w.get("iceberg") else ""
+            etat = {"valide": "✅ a tenu", "invalide": "🔴 cassé",
+                    "actif": "🟢 actif"}.get(w.get("status"), "")
+            lines.append(f"  {w['price']:,.0f}${dist} · {cote} · testé "
+                         f"{w.get('tests', 0)}× · {w['max_qty']:.0f} BTC {etat}{ice}")
+        if len(lines) <= 3:
+            return ("🧱 NIVEAUX FORTS (2 semaines)\n\nAucun niveau testé plusieurs fois "
+                    "pour l'instant — le serveur continue d'accumuler.")
+        return "\n".join(lines)
 
     def _cmd_liquidations(self):
         """Zones de liquidation RÉELLES enregistrées en continu (24/7, persistées sur
