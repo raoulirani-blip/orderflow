@@ -152,7 +152,10 @@ class AlertServer:
                                          cwd=HERE, capture_output=True, text=True).stdout
                 subprocess.run(["git", "reset", "--hard", "origin/main", "--quiet"],
                                cwd=HERE, timeout=30, capture_output=True)
-                _ignore = {"niveaux.json", "server_history.json"}
+                # fichiers qui ne concernent PAS le serveur (interface graphique,
+                # données) -> ne PAS redémarrer quand seuls ceux-là changent
+                _ignore = {"niveaux.json", "server_history.json", "app.py",
+                           "LANCER_COCKPIT.bat", "SYNC_SERVEUR_SETUP.txt"}
                 code_changed = any(l.strip() and l.strip() not in _ignore
                                    for l in changed.splitlines())
                 if code_changed:
@@ -174,7 +177,7 @@ class AlertServer:
             "if [ \"$before\" != \"$after\" ]; then\n"
             "  changed=$(git diff --name-only \"$before\" \"$after\" 2>/dev/null)\n"
             "  git reset --hard origin/main --quiet\n"
-            "  if [ -n \"$(echo \"$changed\" | grep -vE '^(niveaux|server_history).json$')\" ]; then\n"
+            "  if [ -n \"$(echo \"$changed\" | grep -vE '^(niveaux.json|server_history.json|app.py|LANCER_COCKPIT.bat|SYNC_SERVEUR_SETUP.txt)$')\" ]; then\n"
             "    sudo systemctl restart orderflow\n"
             "  fi\n"
             "fi\n"
