@@ -3701,8 +3701,8 @@ class Cockpit(QtWidgets.QMainWindow):
             f"color:{TXT};padding:6px 12px;font-weight:700;}}")
         self.zs_win_combo.currentIndexChanged.connect(self._refresh_zscores)
         zrow.addWidget(self.zs_win_combo)
-        znote = QtWidgets.QLabel("· s'applique à tous les graphiques (agresseurs, CVD, tape…) "
-                                 "· les bandes ±2σ s'adaptent à la fenêtre")
+        znote = QtWidgets.QLabel("· s'applique à tous les graphiques · double-clique un "
+                                 "graphique pour l'AGRANDIR (avec sa propre fenêtre)")
         znote.setStyleSheet(f"color:{DIM};font-size:11px;")
         zrow.addWidget(znote); zrow.addStretch()
         outer.addLayout(zrow)
@@ -3733,6 +3733,10 @@ class Cockpit(QtWidgets.QMainWindow):
                                                  style=QtCore.Qt.PenStyle.DashLine))
             self.zs_plots[mname] = (plt, curve, mean_l, up_l, dn_l)
         outer.addWidget(glw, 1)
+        # double-clic sur un graphique -> vue plein écran détaillée
+        self._zs_glw = glw
+        glw.scene().sigMouseClicked.connect(self._zs_plot_clicked)
+        self._zs_detail_dlgs = []
         self._zs_page = page
 
         self._zs_timer = QtCore.QTimer(self)
@@ -3741,7 +3745,9 @@ class Cockpit(QtWidgets.QMainWindow):
         return page
 
     def _refresh_zscores(self, *args):
-        buf = list(self._zs_buf)
+        # trié par temps : le buffer mélange historique persistant + live + serveur,
+        # une courbe non-monotone en x provoquerait des zigzags
+        buf = sorted(self._zs_buf, key=lambda x: x.get("t", 0))
         if len(buf) < 6:
             return
         now = buf[-1]["t"]
@@ -3808,6 +3814,90 @@ class Cockpit(QtWidgets.QMainWindow):
                 plt.enableAutoRange(axis="x")
             else:
                 plt.setXRange(-win_min, win_min * 0.02, padding=0)
+
+    def _zs_plot_clicked(self, ev):
+        """Double-clic sur un des 9 graphiques -> ouvre la vue détaillée plein écran."""
+        try:
+            if not ev.double():
+                return
+            pos = ev.scenePos()
+        except Exception:
+            return
+        for mname, (plt, *_rest) in self.zs_plots.items():
+            if plt.getViewBox().sceneBoundingRect().contains(pos):
+                self._zs_open_detail(mname)
+                return
+
+    def _zs_open_detail(self, metric):
+        """Fenêtre GRAND FORMAT d'une seule métrique, avec son propre sélecteur de
+        fenêtre de temps et les bandes ±2σ. Se met à jour en direct."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(f"Détail — {metric}")
+        dlg.resize(1150, 680)
+        dlg.setStyleSheet(f"QDialog{{background:{BG};}}")
+        lay = QtWidgets.QVBoxLayout(dlg); lay.setContentsMargins(14, 14, 14, 14); lay.setSpacing(10)
+
+        top = QtWidgets.QHBoxLayout(); top.setSpacing(8)
+        ttl = QtWidgets.QLabel(metric)
+        ttl.setStyleSheet(f"color:{TXT};font-size:18px;font-weight:800;")
+        top.addWidget(ttl); top.addStretch()
+        wl = QtWidgets.QLabel("FENÊTRE :")
+        wl.setStyleSheet(f"color:{DIM};font-size:11px;font-weight:700;letter-spacing:0.5px;")
+        top.addWidget(wl)
+        combo = QtWidgets.QComboBox(); combo.addItems(list(self.ZS_WINDOWS.keys()))
+        combo.setCurrentText(self.zs_win_combo.currentText())
+        combo.setStyleSheet(
+            f"QComboBox{{background:{PANEL};border:1px solid {BORDER};border-radius:8px;"
+            f"color:{TXT};padding:6px 12px;font-weight:700;}}")
+        top.addWidget(combo)
+        lay.addLayout(top)
+
+        plt = pg.PlotWidget(); plt.setBackground(BG)
+        plt.showGrid(x=False, y=True, alpha=0.12)
+        plt.getAxis("left").setTextPen(pg.mkPen(TXT))
+        plt.getAxis("bottom").setTextPen(pg.mkPen(DIM))
+        plt.setLabel("bottom", "minutes (0 = maintenant)")
+        curve = plt.plot([], [], pen=pg.mkPen("#4da3ff", width=1.6))
+        mean_l = plt.addLine(y=0, pen=pg.mkPen("#8a94a6", width=1))
+        up_l = plt.addLine(y=0, pen=pg.mkPen("#f5c518", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        dn_l = plt.addLine(y=0, pen=pg.mkPen("#f5c518", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        lay.addWidget(plt, 1)
+        info = QtWidgets.QLabel("—")
+        info.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:700;background:{PANEL2};"
+                           f"border:1px solid {BORDER};border-radius:8px;padding:8px 12px;")
+        lay.addWidget(info)
+
+        def redraw(*_):
+            buf = sorted(self._zs_buf, key=lambda x: x.get("t", 0))
+            if len(buf) < 3:
+                return
+            now = buf[-1]["t"]
+            xs = [(x["t"] - now) / 60.0 for x in buf]
+            vals = [x.get(metric, 0.0) for x in buf]
+            curve.setData(xs, vals)
+            win = self.ZS_WINDOWS.get(combo.currentText(), 180)
+            vis = [v for v, xm in zip(vals, xs) if win is None or xm >= -win]
+            sub = np.asarray(vis if len(vis) >= 3 else vals, dtype=float)
+            m, sd = float(sub.mean()), float(sub.std())
+            mean_l.setValue(m); up_l.setValue(m + 2 * sd); dn_l.setValue(m - 2 * sd)
+            if win is None:
+                plt.enableAutoRange(axis="x")
+            else:
+                plt.setXRange(-win, win * 0.02, padding=0)
+            z = (vals[-1] - m) / sd if sd > 1e-9 else 0.0
+            zc = RED if abs(z) >= 3 else (AMBER if abs(z) >= 2 else TXT)
+            info.setText(f"Actuel : {vals[-1]:.2f}   ·   moyenne {m:.2f}   ·   "
+                         f"±2σ [{m - 2 * sd:.2f} ; {m + 2 * sd:.2f}]   ·   "
+                         f"<span style='color:{zc};'>z = {z:+.1f}</span>   ·   "
+                         f"{len(vis)} points sur la fenêtre")
+
+        combo.currentIndexChanged.connect(redraw)
+        timer = QtCore.QTimer(dlg); timer.timeout.connect(redraw); timer.start(2000)
+        redraw()
+        self._zs_detail_dlgs.append(dlg)          # garde une référence (non-modal)
+        dlg.finished.connect(lambda *_: self._zs_detail_dlgs.remove(dlg)
+                             if dlg in self._zs_detail_dlgs else None)
+        dlg.show()
 
     # ===========================================================
     # PAGE 8 — NEWS CRYPTO + GUIDE MACRO
