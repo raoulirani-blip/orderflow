@@ -21,3 +21,4 @@ dist/
 *.bat
 *.lnk
 orderflow_deploy.tar.gz
+github_token.txt

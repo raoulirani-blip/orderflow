@@ -80,6 +80,7 @@ class WallHistory:
         # bruit (spoofs, petits murs jamais touchés) — sinon le fichier explose.
         self.long_retention_s = long_retention_s
         self.longterm = deque(maxlen=30000)      # (ts_closed, WallRecord) significatifs
+        self.server_longterm = deque(maxlen=40000)  # mémoire longue reçue du serveur 24/7
         # INVALIDATION : un mur est "cassé/invalidé" dès que le prix le TRAVERSE de
         # plus de break_margin dollars (résistance : prix > mur+marge ; support :
         # prix < mur-marge). Marge réglable en dollars.
@@ -177,11 +178,33 @@ class WallHistory:
         now = time.time()
         window_start = now - minutes * 60
         recs = [rec for rec in self.active.values() if rec.last_seen >= window_start]
-        source = self.closed if minutes * 60 <= self.retention_s else self.longterm
-        for _ts, rec in source:
-            if rec.last_seen >= window_start:
-                recs.append(rec)
+        if minutes * 60 <= self.retention_s:
+            for _ts, rec in self.closed:
+                if rec.last_seen >= window_start:
+                    recs.append(rec)
+        else:
+            # fenêtre longue : mémoire longue LOCALE + celle du SERVEUR 24/7, dé-dupliquées
+            seen = set()
+            for src in (self.longterm, self.server_longterm):
+                for _ts, rec in src:
+                    if rec.last_seen < window_start:
+                        continue
+                    sig = (round(rec.price, 1), rec.side, int(rec.first_seen // 60))
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    recs.append(rec)
         return recs
+
+    def set_server_longterm(self, dicts):
+        """Remplace la mémoire longue SERVEUR (reçue via GitHub) par une liste de dicts."""
+        buf = deque(maxlen=40000)
+        for d in dicts or []:
+            try:
+                buf.append((d.get("last_seen", 0), self._dict_to_rec(d)))
+            except (KeyError, TypeError):
+                continue
+        self.server_longterm = buf
 
     def report(self, minutes, mid=None, top_n=8, max_dist=None, cluster=0.1):
         recs = self._records_in_window(minutes)

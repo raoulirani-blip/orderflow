@@ -26,6 +26,7 @@ from engine import OrderFlowEngine
 from alerts import Notifier
 from ai_copilot import AICopilot
 from telegram_bot import TelegramCopilotBot
+import github_sync
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -79,6 +80,13 @@ class AlertServer:
         threading.Thread(target=self._self_update_loop, daemon=True).start()
         # s'assure que matplotlib est présent (pour la commande /graph), sans bloquer
         threading.Thread(target=self._ensure_matplotlib, daemon=True).start()
+        # HISTORIQUE 24/7 : échantillonne les métriques (agresseurs, CVD…) et PUBLIE
+        # l'historique (murs + métriques + liquidations) sur GitHub pour l'appli locale
+        self._zs_hist = deque(maxlen=4032)          # 14 j à 5 min
+        self._zs_load()
+        self._gh_token = github_sync.read_token(HERE)
+        threading.Thread(target=self._zs_sample_loop, daemon=True).start()
+        threading.Thread(target=self._publish_loop, daemon=True).start()
 
     # ---------- config ----------
     def _load_cfg(self):
@@ -144,7 +152,8 @@ class AlertServer:
                                          cwd=HERE, capture_output=True, text=True).stdout
                 subprocess.run(["git", "reset", "--hard", "origin/main", "--quiet"],
                                cwd=HERE, timeout=30, capture_output=True)
-                code_changed = any(l.strip() and l.strip() != "niveaux.json"
+                _ignore = {"niveaux.json", "server_history.json"}
+                code_changed = any(l.strip() and l.strip() not in _ignore
                                    for l in changed.splitlines())
                 if code_changed:
                     print("[AUTO-UPDATE] nouveau code récupéré — redémarrage automatique")
@@ -165,7 +174,7 @@ class AlertServer:
             "if [ \"$before\" != \"$after\" ]; then\n"
             "  changed=$(git diff --name-only \"$before\" \"$after\" 2>/dev/null)\n"
             "  git reset --hard origin/main --quiet\n"
-            "  if [ -n \"$(echo \"$changed\" | grep -v '^niveaux.json$')\" ]; then\n"
+            "  if [ -n \"$(echo \"$changed\" | grep -vE '^(niveaux|server_history).json$')\" ]; then\n"
             "    sudo systemctl restart orderflow\n"
             "  fi\n"
             "fi\n"
@@ -785,6 +794,89 @@ class AlertServer:
                         f"d'habitude ({tape/self._tape_ema:.1f}x) @ {mid:,.0f}. Le marché s'active.")
                     print("[ALERTE] accélération")
                     self._alert_state["accel"] = now
+
+    # ---------- historique 24/7 des métriques + publication GitHub ----------
+    def _zs_path(self):
+        return os.path.join(HERE, "zscore_history.json")
+
+    def _zs_load(self):
+        import time as _t
+        try:
+            with open(self._zs_path(), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        cut = _t.time() - 14 * 24 * 3600
+        for x in data:
+            if isinstance(x, dict) and x.get("t", 0) >= cut:
+                self._zs_hist.append(x)
+
+    def _zs_save(self):
+        try:
+            with open(self._zs_path(), "w", encoding="utf-8") as f:
+                json.dump(list(self._zs_hist), f, separators=(",", ":"))
+        except OSError:
+            pass
+
+    def _zs_sample_loop(self):
+        """Échantillonne les 9 métriques toutes les 5 min, 24/7 (même PC éteint)."""
+        import time as _t
+        last_save = 0.0
+        while True:
+            _t.sleep(300)
+            s = self.state or {}
+            if not s.get("mid") or s.get("warming"):
+                continue
+            try:
+                cv = self.engine.get_cvd_windows()
+                pos = self.engine.get_positioning()
+                seg = self.engine.get_flow_segments(300)
+                oi = pos.get("oi") or {}
+                fd = pos.get("funding") or {}
+
+                def cvd(m):
+                    d = cv.get(m, {})
+                    return d.get("cvd", 0.0) if d.get("ready") else 0.0
+                self._zs_hist.append({
+                    "t": _t.time(),
+                    "CVD 1min": cvd(1), "CVD 5min": cvd(5), "CVD 15min": cvd(15),
+                    "Agresseurs %": s.get("aggressor_ratio", 0.5) * 100,
+                    "Tape (tr/s)": s.get("tape_speed", 0.0),
+                    "Imbalance %": s.get("imbalance", 0.5) * 100,
+                    "OI Δ5min %": oi.get("chg_5m_pct", 0.0),
+                    "Funding %": fd.get("rate_pct", 0.0) or 0.0,
+                    "Instit Δ5min": seg["inst"]["delta"] if seg else 0.0,
+                })
+                if _t.time() - last_save > 120:
+                    last_save = _t.time()
+                    self._zs_save()
+            except Exception:
+                pass
+
+    def _publish_loop(self):
+        """Publie l'historique complet sur GitHub toutes les 30 min (léger : < 1 Mo)."""
+        import time as _t
+        _t.sleep(60)                        # laisse le moteur se remplir un peu
+        while True:
+            if self._gh_token:
+                try:
+                    wh = self.engine.wall_history
+                    walls = [wh._rec_to_dict(r) for _ts, r in list(wh.longterm)][-3000:]
+                    with self.engine.agg._lock:
+                        liqs = list(self.engine.agg.liqs)[-1500:]
+                    data = {"saved_at": _t.time(),
+                            "walls_longterm": walls,
+                            "zscore": list(self._zs_hist)[-2016:],   # ~7 j à 5 min
+                            "liquidations": liqs}
+                    ok, msg = github_sync.publish(self._gh_token, data)
+                    print(f"[SYNC] publication historique : {msg}")
+                except Exception as e:
+                    print(f"[SYNC] erreur publication : {e}")
+            else:
+                print("[SYNC] github_token.txt absent — publication désactivée. "
+                      "Voir DEPLOY : créer un token GitHub pour activer la synchro.")
+            for _ in range(1800):
+                _t.sleep(1)
 
     def run(self):
         self.engine.start()

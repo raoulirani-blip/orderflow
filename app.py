@@ -28,6 +28,7 @@ from paths import app_dir, data_file
 class Bridge(QtCore.QObject):
     state = QtCore.pyqtSignal(dict)
     journal_closed = QtCore.pyqtSignal()   # rattrapage hors-ligne -> refresh UI
+    server_history = QtCore.pyqtSignal(dict)   # historique 24/7 reçu du serveur (GitHub)
 
 
 BG="#0a0d12"; PANEL="#10151e"; PANEL2="#151b26"; BORDER="#1d2531"
@@ -56,6 +57,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self.bridge = Bridge()
         self.bridge.state.connect(self.on_state)
         self.bridge.journal_closed.connect(self._journal_refresh)
+        self.bridge.server_history.connect(self._apply_server_history)
         self.engine = OrderFlowEngine(on_update=lambda s: self.bridge.state.emit(s))
         self.analyzer = SlowAnalyzer(verdict_window_s=10.0, zone_persist_s=3.0)
         self._last_state = None
@@ -246,6 +248,13 @@ class Cockpit(QtWidgets.QMainWindow):
         # raccourci clavier Ctrl+V -> page VWAP
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+V"), self,
                         activated=lambda: self.tabs.setCurrentWidget(self._vwap_page))
+
+        # historique 24/7 du serveur (murs + agresseurs + liquidations) via GitHub :
+        # au lancement (comble les trous PC éteint) puis toutes les 30 min
+        QtCore.QTimer.singleShot(4000, self._fetch_server_history)
+        self._srv_hist_timer = QtCore.QTimer(self)
+        self._srv_hist_timer.timeout.connect(self._fetch_server_history)
+        self._srv_hist_timer.start(1800 * 1000)
 
     def _build_bilans_section(self):
         """Section BILANS PÉRIODIQUES (5/15/30/60 min) — autrefois dans la page
@@ -596,6 +605,65 @@ class Cockpit(QtWidgets.QMainWindow):
         if getattr(widget, "_last_html", None) != html:
             widget._last_html = html
             widget.setHtml(html)
+
+    def _fetch_server_history(self):
+        """Télécharge (en fond) l'historique 24/7 publié par le serveur sur GitHub
+        et l'envoie au thread UI pour fusion. Silencieux si non configuré."""
+        import threading
+
+        def _run():
+            try:
+                import github_sync
+                data = github_sync.fetch()
+            except Exception:
+                data = None
+            if data:
+                self.bridge.server_history.emit(data)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_server_history(self, data):
+        """Fusionne l'historique du serveur (murs + métriques + liquidations) dans
+        l'appli : comble les trous des périodes PC éteint. Tourne sur le thread UI."""
+        import time as _t
+        # 1) murs : mémoire longue du serveur (utilisée par les fenêtres jour/semaine)
+        try:
+            self.engine.wall_history.set_server_longterm(data.get("walls_longterm"))
+        except Exception:
+            pass
+        # 2) métriques (agresseurs, CVD…) : comble les trous, garde le détail local (5 s)
+        zs = data.get("zscore") or []
+        if zs and hasattr(self, "_zs_buf"):
+            by_min = {int(x.get("t", 0) // 60): x for x in self._zs_buf}   # local prioritaire
+            for x in zs:
+                b = int(x.get("t", 0) // 60)
+                by_min.setdefault(b, x)
+            ordered = sorted(by_min.values(), key=lambda x: x.get("t", 0))
+            self._zs_buf.clear()
+            for x in ordered[-self._zs_buf.maxlen:]:
+                self._zs_buf.append(x)
+        # 3) liquidations : fusionne (dé-dupliqué, 48 h)
+        liqs = data.get("liquidations") or []
+        if liqs:
+            cut = _t.time() - 48 * 3600
+            with self.engine.agg._lock:
+                have = {(round(t, 0), s, round(p, 1))
+                        for x in self.engine.agg.liqs if len(x) == 4
+                        for t, s, p, q in [x]}
+                for item in liqs:
+                    if not (isinstance(item, (list, tuple)) and len(item) == 4):
+                        continue
+                    t, s, p, q = item
+                    if t < cut:
+                        continue
+                    k = (round(t, 0), s, round(p, 1))
+                    if k not in have:
+                        self.engine.agg.liqs.append(tuple(item)); have.add(k)
+        # rafraîchit la vue z-scores si visible
+        try:
+            if self.tabs.currentWidget() is getattr(self, "_zs_page", None):
+                self._refresh_zscores()
+        except Exception:
+            pass
 
     def _update_live_pnl(self, mid):
         """P&L FLOTTANT en direct sur les positions ouvertes : pastille dans le coin
@@ -3676,7 +3744,7 @@ class Cockpit(QtWidgets.QMainWindow):
             return (a if hi else b) + (" ⚠ EXTRÊME" if abs(z) >= 3 else "")
 
         for i, mname in enumerate(self.ZS_METRICS):
-            vals = [x[mname] for x in buf]
+            vals = [x.get(mname, 0.0) for x in buf]
             cur = vals[-1]
             zz = {}
             for scale, nsamp in (("15min", 180), ("1h", 720), ("3h", 2160)):
@@ -3705,7 +3773,7 @@ class Cockpit(QtWidgets.QMainWindow):
 
         # graphiques : valeur brute + moyenne ±2σ (fenêtre 1h)
         for mname, (plt, curve, mean_l, up_l, dn_l) in self.zs_plots.items():
-            vals = [x[mname] for x in buf]
+            vals = [x.get(mname, 0.0) for x in buf]
             xs = [(x["t"] - now) / 60.0 for x in buf]          # minutes (négatif → 0)
             curve.setData(xs, vals)
             sub = np.asarray(vals[-720:], dtype=float)

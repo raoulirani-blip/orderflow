@@ -1,0 +1,51 @@
+========================================================================
+ SYNCHRO 24/7 SERVEUR -> APPLI  (historique murs + agresseurs, PC eteint)
+========================================================================
+
+But : le serveur enregistre tout 24/7 et PUBLIE son historique sur GitHub ;
+ton appli locale le telecharge et le fusionne automatiquement. Comme ca tu as
+l'historique complet, PC allume ou eteint.
+
+Il y a UNE seule chose a faire, une fois : donner au serveur un "token" GitHub
+pour qu'il ait le droit d'ecrire le fichier server_history.json.
+
+------------------------------------------------------------------------
+ETAPE 1 - Creer le token GitHub (2 min)
+------------------------------------------------------------------------
+1. Va sur : https://github.com/settings/tokens?type=beta
+   (Settings -> Developer settings -> Personal access tokens -> Fine-grained)
+2. "Generate new token".
+   - Name : orderflow-serveur
+   - Expiration : 1 an (ou "No expiration")
+   - Repository access : "Only select repositories" -> choisis  orderflow
+   - Permissions -> Repository permissions -> "Contents" : passe a  Read and write
+3. "Generate token" et COPIE le token (il commence par  github_pat_...  ).
+   Tu ne le reverras plus, copie-le tout de suite.
+
+------------------------------------------------------------------------
+ETAPE 2 - Donner le token au serveur (2 min)
+------------------------------------------------------------------------
+Connecte-toi a ton serveur Google Cloud (bouton SSH dans la console), puis :
+
+   cd ~/orderflow
+   nano github_token.txt
+
+Colle le token, puis Ctrl+O, Entree, Ctrl+X pour sauvegarder.
+(Le fichier est ignore par git : il ne sera JAMAIS publie, c'est un secret.)
+
+Puis relance le serveur :
+   sudo systemctl restart orderflow
+
+------------------------------------------------------------------------
+C'EST TOUT.
+------------------------------------------------------------------------
+- Le serveur publie l'historique toutes les 30 min (fichier < 1 Mo, gratuit).
+- Ton appli le recupere au lancement puis toutes les 30 min, et comble les
+  trous des periodes ou ton PC etait eteint (murs des fenetres jour/semaine,
+  historique des agresseurs sur la page Z-scores, liquidations).
+- Pour verifier cote serveur :   journalctl -u orderflow -f
+  tu dois voir des lignes  [SYNC] publication historique : publie (xxx Ko)
+
+Sans token, tout continue de marcher : le serveur enregistre quand meme en
+local, l'appli garde son propre historique. Le token ne sert qu'a RELIER les
+deux via GitHub.
