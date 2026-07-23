@@ -367,6 +367,15 @@ class Cockpit(QtWidgets.QMainWindow):
             f"color:{TXT};padding:6px 12px;font-weight:700;}}")
         drow.addWidget(self.wall_sort_combo)
         drow.addStretch()
+        # bouton CARTE : ouvre la carte des murs de la fenêtre + catégorie affichées
+        map_btn = QtWidgets.QPushButton("📊 Carte des murs")
+        map_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        map_btn.setToolTip("Affiche où sont les murs par rapport au prix (fenêtre + catégorie en cours)")
+        map_btn.setStyleSheet(
+            f"QPushButton{{background:{ACCENT};color:#08111f;border:none;border-radius:8px;"
+            f"padding:7px 16px;font-weight:800;}}QPushButton:hover{{background:#7ab6ff;}}")
+        map_btn.clicked.connect(self._open_wall_map)
+        drow.addWidget(map_btn)
         outer.addLayout(drow)
 
         self.wall_tabs = QtWidgets.QTabWidget()
@@ -421,24 +430,6 @@ class Cockpit(QtWidgets.QMainWindow):
                 f"border-top-left-radius:7px;border-top-right-radius:7px;font-weight:700;font-size:12px;}}"
                 f"QTabBar::tab:selected{{background:{ACCENT};color:#08111f;}}")
 
-            # sous-onglet CARTE : où sont les murs par rapport au prix + totaux
-            carte = QtWidgets.QWidget()
-            cl = QtWidgets.QVBoxLayout(carte); cl.setContentsMargins(8, 8, 8, 8); cl.setSpacing(6)
-            cmap_sum = QtWidgets.QLabel("Carte des murs — en attente…")
-            cmap_sum.setStyleSheet(
-                f"color:{TXT};font-size:14px;font-weight:800;background:{PANEL2};"
-                f"border:1px solid {BORDER};border-radius:8px;padding:9px 12px;")
-            cl.addWidget(cmap_sum)
-            cmap = pg.PlotWidget(); cmap.setBackground(BG)
-            cmap.showGrid(x=True, y=True, alpha=0.10)
-            cmap.setMenuEnabled(False)
-            cmap.getAxis("left").setTextPen(pg.mkColor(TXT))
-            cmap.getAxis("bottom").setTextPen(pg.mkColor(DIM))
-            cmap.getAxis("left").setWidth(72)
-            cmap.setLabel("bottom", "taille du mur (M$)")
-            cl.addWidget(cmap, 1)
-            sub.addTab(carte, "  📊  CARTE  ")
-
             table = mk_table(["Statut","Côté","Prix","Taille BTC","Valeur $","Durée","Tests"])
             sub.addTab(table, "  📋  TOUS LES MURS  ")
             solid = mk_table(["Statut","Côté","Prix","Taille BTC","Valeur $","Tests","Durée"])
@@ -457,8 +448,8 @@ class Cockpit(QtWidgets.QMainWindow):
             self.wall_tabs.addTab(wp, f"  {self.WALL_WIN_LABELS.get(m, str(m) + ' min')}  ")
             self.wall_widgets[m] = {"header": header, "longest": longest, "catbar": catbar,
                                     "table": table, "solid": solid, "valid": valid,
-                                    "broken": broken, "flux": flux,
-                                    "cmap": cmap, "cmap_sum": cmap_sum, "cmap_items": []}
+                                    "broken": broken, "flux": flux, "sub": sub,
+                                    "_rep": None, "_mid": None}
         return page
 
     def _topbar(self):
@@ -978,61 +969,115 @@ class Cockpit(QtWidgets.QMainWindow):
                 f"🕒 Fenêtre {self.WALL_WIN_LABELS.get(m, str(m)+chr(32)+'min')}   ·   dernière mise à jour : {last}   ·   "
                 f"prochaine dans {mm:02d}:{ss:02d}")
 
-    def _render_wall_map(self, w, walls, mid):
-        """CARTE DES MURS : chaque mur = une barre horizontale à son prix, longueur =
-        sa taille en M$, vert = support (achat) / rouge = résistance (vente). Ligne de
-        prix actuelle + totaux au-dessus (résistance) et en dessous (support)."""
-        plt = w["cmap"]
-        for it in w.get("cmap_items", []):
-            plt.removeItem(it)
-        w["cmap_items"] = []
+    def _open_wall_map(self):
+        """Ouvre la CARTE des murs de la fenêtre + catégorie ACTUELLEMENT affichées
+        (elle suit quand tu changes d'onglet). Zoom/déplacement libre à la souris."""
+        if getattr(self, "_wall_map_dlg", None):
+            self._wall_map_dlg.raise_(); self._wall_map_dlg.activateWindow()
+            self._wall_map_dlg.redraw(reset=True); return
+        dlg = QtWidgets.QDialog(self)
+        dlg.resize(900, 780); dlg.setStyleSheet(f"QDialog{{background:{BG};}}")
+        lay = QtWidgets.QVBoxLayout(dlg); lay.setContentsMargins(12, 12, 12, 12); lay.setSpacing(8)
+        top = QtWidgets.QHBoxLayout()
+        summ = QtWidgets.QLabel("…"); summ.setWordWrap(True)
+        summ.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:800;background:{PANEL2};"
+                           f"border:1px solid {BORDER};border-radius:8px;padding:8px 12px;")
+        top.addWidget(summ, 1)
+        reset = QtWidgets.QPushButton("⟲ Recadrer")
+        reset.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        reset.setStyleSheet(f"QPushButton{{background:{PANEL};color:{TXT};border:1px solid {BORDER};"
+                            f"border-radius:8px;padding:6px 12px;font-weight:700;}}"
+                            f"QPushButton:hover{{border:1px solid {ACCENT};color:{ACCENT};}}")
+        top.addWidget(reset)
+        lay.addLayout(top)
+        plt = pg.PlotWidget(); plt.setBackground(BG)
+        plt.showGrid(x=True, y=True, alpha=0.10); plt.setMenuEnabled(False)
+        plt.getAxis("left").setTextPen(pg.mkColor(TXT))
+        plt.getAxis("bottom").setTextPen(pg.mkColor(DIM))
+        plt.getAxis("left").setWidth(74); plt.setLabel("bottom", "taille du mur (M$)")
+        plt.setMouseEnabled(x=True, y=True)          # molette = zoom, glisser = déplacer
+        lay.addWidget(plt, 1)
+        items = []
+
+        def redraw(reset=False):
+            idx = self.wall_tabs.currentIndex()
+            wins = getattr(self, "WALL_WINDOWS", [])
+            if idx < 0 or idx >= len(wins):
+                return
+            m = wins[idx]; w = self.wall_widgets.get(m, {})
+            rep = w.get("_rep"); mid = w.get("_mid"); subw = w.get("sub")
+            for it in items:
+                plt.removeItem(it)
+            items.clear()
+            if not rep or not mid:
+                summ.setText("En attente des données du carnet…")
+                return
+            cats = rep.get("categories", {})
+            ci = subw.currentIndex() if subw else 0
+            if ci == 1:
+                walls = cats.get("actif", []); catname = "ACTIFS"
+            elif ci == 2:
+                walls = cats.get("valide", []); catname = "VALIDÉS"
+            elif ci == 3:
+                walls = cats.get("invalide", []) + cats.get("spoof", []); catname = "INVALIDÉS"
+            else:
+                walls = rep.get("top", []); catname = "TOUS"
+            lbl = self.WALL_WIN_LABELS.get(m, f"{m} min")
+            dlg.setWindowTitle(f"Carte des murs — {lbl} · {catname}")
+            # change de fenêtre/catégorie -> on recadre ; sinon on garde ton zoom
+            ctx = (m, ci)
+            if ctx != getattr(dlg, "_ctx", None):
+                reset = True; dlg._ctx = ctx
+            self._draw_wall_map(plt, items, summ, walls, mid, reset)
+
+        dlg.redraw = redraw
+        reset.clicked.connect(lambda: redraw(reset=True))
+        dlg.finished.connect(lambda *_: setattr(self, "_wall_map_dlg", None))
+        self._wall_map_dlg = dlg
+        redraw(reset=True)
+        dlg.show()
+
+    def _draw_wall_map(self, plt, items, summ, walls, mid, reset):
+        """Dessine la carte : barres horizontales des murs par prix + totaux + verdict.
+        reset=True recadre la vue ; reset=False garde le zoom de l'utilisateur."""
         walls = [x for x in (walls or []) if x.get("price") and x.get("usd")]
         if not mid or not walls:
-            w["cmap_sum"].setText("Carte des murs — aucun mur dans la fenêtre / distance choisie.")
+            summ.setText("Aucun mur dans cette catégorie / fenêtre (élargis la distance en haut).")
             return
         above = below = 0.0
-        maxm = max(x["usd"] for x in walls) / 1e6 or 1.0
+        maxm = (max(x["usd"] for x in walls) / 1e6) or 1.0
         for x in walls:
             price = x["price"]; m_usd = x["usd"] / 1e6
             is_above = price > mid
-            col = (205, 76, 88) if is_above else (46, 194, 126)   # rouge résist / vert support
-            if is_above:
-                above += x["usd"]
-            else:
-                below += x["usd"]
-            bar = pg.BarGraphItem(x0=0, width=m_usd, y=price,
-                                  height=(mid * 0.0006), brush=col, pen=None)
-            plt.addItem(bar); w["cmap_items"].append(bar)
-            # montant de CHAQUE mur au bout de sa barre
+            col = (205, 76, 88) if is_above else (46, 194, 126)
+            above += x["usd"] if is_above else 0.0
+            below += 0.0 if is_above else x["usd"]
+            bar = pg.BarGraphItem(x0=0, width=m_usd, y=price, height=(mid * 0.0006),
+                                  brush=col, pen=None)
+            plt.addItem(bar); items.append(bar)
             txt = pg.TextItem(html=f"<span style='font-size:8pt;color:{TXT};font-weight:700;'>"
-                                   f"{m_usd:.1f}M</span>", anchor=(0, 0.5))
+                                   f"{m_usd:.1f}M · {price:,.0f}</span>", anchor=(0, 0.5))
             txt.setPos(m_usd * 1.02, price)
-            plt.addItem(txt); w["cmap_items"].append(txt)
-        # ligne de prix actuel
+            plt.addItem(txt); items.append(txt)
         pl = pg.InfiniteLine(pos=mid, angle=0,
                              pen=pg.mkPen("#00e5ff", width=1.6, style=QtCore.Qt.PenStyle.DashLine),
                              label=f"prix {mid:,.0f}",
                              labelOpts={"color": "#0d1117", "fill": (0, 229, 255, 230), "position": 0.5})
-        plt.addItem(pl); w["cmap_items"].append(pl)
-        prices = [x["price"] for x in walls]
-        pad = (max(prices) - min(prices)) * 0.06 + mid * 0.0008
-        plt.setYRange(min(prices + [mid]) - pad, max(prices + [mid]) + pad, padding=0)
-        plt.setXRange(0, maxm * 1.18, padding=0)
-        # bandeau totaux au-dessus / en dessous + verdict
-        tot = above + below
-        if tot > 0:
-            r_above = above / tot * 100
-            if above > below * 1.3:
-                verdict = f"<span style='color:{RED};'>▲ Plus de résistance AU-DESSUS — " \
-                          "le haut est chargé (le prix peut buter / être tiré vers le bas)</span>"
-            elif below > above * 1.3:
-                verdict = f"<span style='color:{GREEN};'>▼ Plus de support EN DESSOUS — " \
-                          "le bas est soutenu (biais plutôt haussier)</span>"
-            else:
-                verdict = f"<span style='color:{DIM};'>≈ Équilibré au-dessus / en dessous</span>"
+        plt.addItem(pl); items.append(pl)
+        if reset:
+            prices = [x["price"] for x in walls] + [mid]
+            pad = (max(prices) - min(prices)) * 0.06 + mid * 0.0008
+            plt.setYRange(min(prices) - pad, max(prices) + pad, padding=0)
+            plt.setXRange(0, maxm * 1.20, padding=0)
+        if above > below * 1.3:
+            verdict = (f"<span style='color:{RED};'>▲ Plus de résistance AU-DESSUS — le haut "
+                       "est chargé (le prix peut buter / être tiré vers le bas)</span>")
+        elif below > above * 1.3:
+            verdict = (f"<span style='color:{GREEN};'>▼ Plus de support EN DESSOUS — le bas "
+                       "est soutenu (biais plutôt haussier)</span>")
         else:
-            verdict = ""
-        w["cmap_sum"].setText(
+            verdict = f"<span style='color:{DIM};'>≈ Équilibré au-dessus / en dessous</span>"
+        summ.setText(
             f"<span style='color:{RED};'>Résistance (au-dessus) : {above/1e6:.1f} M$</span>"
             f"   ·   <span style='color:{GREEN};'>Support (en dessous) : {below/1e6:.1f} M$</span>"
             f"   ·   {verdict}")
@@ -1109,7 +1154,7 @@ class Cockpit(QtWidgets.QMainWindow):
             # --- TABLEAU PRINCIPAL : tous les murs par importance ---
             t = w["table"]; top = rep["top"]
             w["_top_walls"] = top          # mémorisé pour le sous-onglet EXÉCUTÉ/EN ATTENTE
-            self._render_wall_map(w, top, mid)   # carte des murs (où ils sont + totaux)
+            w["_rep"] = rep; w["_mid"] = mid       # pour la CARTE (bouton) à la demande
             t.setRowCount(len(top))
             for i, wl in enumerate(top):
                 sidecol = GREEN if wl["side"] == "bid" else RED
@@ -1270,6 +1315,13 @@ class Cockpit(QtWidgets.QMainWindow):
                 ]
                 for j, (v, cc) in enumerate(cells):
                     ft.setItem(i, j, adcell(v, cc))
+
+        # met à jour la carte des murs si elle est ouverte (données en direct)
+        if getattr(self, "_wall_map_dlg", None):
+            try:
+                self._wall_map_dlg.redraw()
+            except Exception:
+                pass
 
     # ===========================================================
     # PAGE 4 — VWAP & CVD MULTI-FENÊTRES
