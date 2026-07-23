@@ -996,6 +996,9 @@ class Cockpit(QtWidgets.QMainWindow):
         plt.getAxis("bottom").setTextPen(pg.mkColor(DIM))
         plt.getAxis("left").setWidth(74); plt.setLabel("bottom", "taille du mur (M$)")
         plt.setMouseEnabled(x=True, y=True)          # molette = zoom, glisser = déplacer
+        plt._wm_items = []
+        # quand on zoome en Y, on affine l'épaisseur des barres (constante à l'écran)
+        plt.getViewBox().sigYRangeChanged.connect(lambda *_: self._wallmap_resize_bars(plt))
         lay.addWidget(plt, 1)
         items = []
 
@@ -1037,29 +1040,45 @@ class Cockpit(QtWidgets.QMainWindow):
         redraw(reset=True)
         dlg.show()
 
+    def _wm_bar_height(self, plt):
+        """Épaisseur d'une barre = petite fraction de la vue Y actuelle -> reste fine
+        et constante à l'écran (s'affine quand on zoome)."""
+        try:
+            y0, y1 = plt.getViewBox().viewRange()[1]
+            h = (y1 - y0) * 0.006
+            return h if h > 0 else 1.0
+        except Exception:
+            return 1.0
+
+    def _wallmap_resize_bars(self, plt):
+        """Réajuste l'épaisseur des barres quand on zoome (centrées sur leur prix)."""
+        h = self._wm_bar_height(plt)
+        for bg, centers in getattr(plt, "_wm_items", []):
+            try:
+                bg.setOpts(y0=[c - h / 2 for c in centers], y1=[c + h / 2 for c in centers])
+            except Exception:
+                pass
+
     def _draw_wall_map(self, plt, items, summ, walls, mid, reset):
-        """Dessine la carte : barres horizontales des murs par prix + totaux + verdict.
-        reset=True recadre la vue ; reset=False garde le zoom de l'utilisateur."""
+        """Carte : barres par prix (colorées par CÔTÉ) + liquidité au-dessus/en dessous
+        + split achat/vente. reset=True recadre ; reset=False garde ton zoom."""
+        plt._wm_items = []
         walls = [x for x in (walls or []) if x.get("price") and x.get("usd")]
         if not mid or not walls:
             summ.setText("Aucun mur dans cette catégorie / fenêtre (élargis la distance en haut).")
             return
-        buy = sell = 0.0                          # par CÔTÉ (bid = achat, ask = vente)
+        above = below = buy = sell = 0.0
         maxm = (max(x["usd"] for x in walls) / 1e6) or 1.0
+        bids = []; asks = []                       # (prix, taille M$)
         for x in walls:
             price = x["price"]; m_usd = x["usd"] / 1e6
-            is_bid = x.get("side") == "bid"        # mur d'ACHAT (support/demande)
-            col = (46, 194, 126) if is_bid else (205, 76, 88)   # vert achat / rouge vente
-            if is_bid:
-                buy += x["usd"]
-            else:
-                sell += x["usd"]
-            bar = pg.BarGraphItem(x0=0, width=m_usd, y=price, height=(mid * 0.0006),
-                                  brush=col, pen=None)
-            plt.addItem(bar); items.append(bar)
-            tag = "ACHAT" if is_bid else "VENTE"
-            tagcol = GREEN if is_bid else RED
-            # signale les cas particuliers : achat AU-DESSUS ou vente EN DESSOUS du prix
+            is_bid = x.get("side") == "bid"
+            (bids if is_bid else asks).append((price, m_usd))
+            above += x["usd"] if price > mid else 0.0
+            below += x["usd"] if price <= mid else 0.0
+            buy += x["usd"] if is_bid else 0.0
+            sell += x["usd"] if not is_bid else 0.0
+            tag = "ACHAT" if is_bid else "VENTE"; tagcol = GREEN if is_bid else RED
             odd = " ⚠" if (is_bid and price > mid) or (not is_bid and price < mid) else ""
             txt = pg.TextItem(html=f"<span style='font-size:8pt;color:{tagcol};font-weight:700;'>"
                                    f"{m_usd:.1f}M {tag}{odd}</span> "
@@ -1067,30 +1086,39 @@ class Cockpit(QtWidgets.QMainWindow):
                               anchor=(0, 0.5))
             txt.setPos(m_usd * 1.02, price)
             plt.addItem(txt); items.append(txt)
+        # recadrage éventuel AVANT de dimensionner les barres (l'épaisseur suit la vue)
+        if reset:
+            prices = [p for p, _ in bids + asks] + [mid]
+            pad = (max(prices) - min(prices)) * 0.06 + mid * 0.0008
+            plt.setYRange(min(prices) - pad, max(prices) + pad, padding=0)
+            plt.setXRange(0, maxm * 1.20, padding=0)
+        h = self._wm_bar_height(plt)
+        for group, col in ((bids, (46, 194, 126)), (asks, (205, 76, 88))):
+            if not group:
+                continue
+            ys = [p for p, _ in group]; ws = [w for _, w in group]
+            bg = pg.BarGraphItem(x0=0, width=ws, y0=[p - h / 2 for p in ys],
+                                 y1=[p + h / 2 for p in ys], brush=col, pen=None)
+            plt.addItem(bg); items.append(bg); plt._wm_items.append((bg, ys))
         pl = pg.InfiniteLine(pos=mid, angle=0,
                              pen=pg.mkPen("#00e5ff", width=1.6, style=QtCore.Qt.PenStyle.DashLine),
                              label=f"prix {mid:,.0f}",
                              labelOpts={"color": "#0d1117", "fill": (0, 229, 255, 230), "position": 0.5})
         plt.addItem(pl); items.append(pl)
-        if reset:
-            prices = [x["price"] for x in walls] + [mid]
-            pad = (max(prices) - min(prices)) * 0.06 + mid * 0.0008
-            plt.setYRange(min(prices) - pad, max(prices) + pad, padding=0)
-            plt.setXRange(0, maxm * 1.20, padding=0)
-        if buy > sell * 1.3:
-            verdict = (f"<span style='color:{GREEN};'>▲ Plus de murs d'ACHAT (demande) — "
-                       "biais plutôt haussier</span>")
-        elif sell > buy * 1.3:
-            verdict = (f"<span style='color:{RED};'>▼ Plus de murs de VENTE (offre) — "
-                       "biais plutôt baissier</span>")
+        # verdict directionnel = où est le plus de LIQUIDITÉ (au-dessus / en dessous)
+        if above > below * 1.3:
+            vpos = (f"<span style='color:{RED};'>plus chargé AU-DESSUS (barrière/aimant en haut)</span>")
+        elif below > above * 1.3:
+            vpos = (f"<span style='color:{GREEN};'>plus chargé EN DESSOUS (coussin en bas)</span>")
         else:
-            verdict = f"<span style='color:{DIM};'>≈ Achat / vente équilibrés</span>"
+            vpos = f"<span style='color:{DIM};'>équilibré au-dessus / en dessous</span>"
         summ.setText(
-            f"<span style='color:{GREEN};'>Murs d'ACHAT (support) : {buy/1e6:.1f} M$</span>"
-            f"   ·   <span style='color:{RED};'>Murs de VENTE (résistance) : {sell/1e6:.1f} M$</span>"
-            f"   ·   {verdict}"
-            f"<br><span style='color:{DIM};font-size:11px;'>Coloré par CÔTÉ du mur (pas par "
-            f"position). ⚠ = mur à contre-position (achat au-dessus / vente en dessous du prix).</span>")
+            f"<b>Liquidité — AU-DESSUS : {above/1e6:.1f} M$ · EN DESSOUS : {below/1e6:.1f} M$</b>"
+            f"   ·   {vpos}"
+            f"<br><span style='color:{GREEN};'>ACHAT (demande) : {buy/1e6:.1f} M$</span> · "
+            f"<span style='color:{RED};'>VENTE (offre) : {sell/1e6:.1f} M$</span>"
+            f"   <span style='color:{DIM};font-size:11px;'>· coloré par CÔTÉ · "
+            f"⚠ = mur à contre-position · un gros mur peut bloquer OU attirer le prix</span>")
 
     def _refresh_walls(self):
         import time as _t
