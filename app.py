@@ -1044,19 +1044,27 @@ class Cockpit(QtWidgets.QMainWindow):
         if not mid or not walls:
             summ.setText("Aucun mur dans cette catégorie / fenêtre (élargis la distance en haut).")
             return
-        above = below = 0.0
+        buy = sell = 0.0                          # par CÔTÉ (bid = achat, ask = vente)
         maxm = (max(x["usd"] for x in walls) / 1e6) or 1.0
         for x in walls:
             price = x["price"]; m_usd = x["usd"] / 1e6
-            is_above = price > mid
-            col = (205, 76, 88) if is_above else (46, 194, 126)
-            above += x["usd"] if is_above else 0.0
-            below += 0.0 if is_above else x["usd"]
+            is_bid = x.get("side") == "bid"        # mur d'ACHAT (support/demande)
+            col = (46, 194, 126) if is_bid else (205, 76, 88)   # vert achat / rouge vente
+            if is_bid:
+                buy += x["usd"]
+            else:
+                sell += x["usd"]
             bar = pg.BarGraphItem(x0=0, width=m_usd, y=price, height=(mid * 0.0006),
                                   brush=col, pen=None)
             plt.addItem(bar); items.append(bar)
-            txt = pg.TextItem(html=f"<span style='font-size:8pt;color:{TXT};font-weight:700;'>"
-                                   f"{m_usd:.1f}M · {price:,.0f}</span>", anchor=(0, 0.5))
+            tag = "ACHAT" if is_bid else "VENTE"
+            tagcol = GREEN if is_bid else RED
+            # signale les cas particuliers : achat AU-DESSUS ou vente EN DESSOUS du prix
+            odd = " ⚠" if (is_bid and price > mid) or (not is_bid and price < mid) else ""
+            txt = pg.TextItem(html=f"<span style='font-size:8pt;color:{tagcol};font-weight:700;'>"
+                                   f"{m_usd:.1f}M {tag}{odd}</span> "
+                                   f"<span style='font-size:8pt;color:{DIM};'>{price:,.0f}</span>",
+                              anchor=(0, 0.5))
             txt.setPos(m_usd * 1.02, price)
             plt.addItem(txt); items.append(txt)
         pl = pg.InfiniteLine(pos=mid, angle=0,
@@ -1069,18 +1077,20 @@ class Cockpit(QtWidgets.QMainWindow):
             pad = (max(prices) - min(prices)) * 0.06 + mid * 0.0008
             plt.setYRange(min(prices) - pad, max(prices) + pad, padding=0)
             plt.setXRange(0, maxm * 1.20, padding=0)
-        if above > below * 1.3:
-            verdict = (f"<span style='color:{RED};'>▲ Plus de résistance AU-DESSUS — le haut "
-                       "est chargé (le prix peut buter / être tiré vers le bas)</span>")
-        elif below > above * 1.3:
-            verdict = (f"<span style='color:{GREEN};'>▼ Plus de support EN DESSOUS — le bas "
-                       "est soutenu (biais plutôt haussier)</span>")
+        if buy > sell * 1.3:
+            verdict = (f"<span style='color:{GREEN};'>▲ Plus de murs d'ACHAT (demande) — "
+                       "biais plutôt haussier</span>")
+        elif sell > buy * 1.3:
+            verdict = (f"<span style='color:{RED};'>▼ Plus de murs de VENTE (offre) — "
+                       "biais plutôt baissier</span>")
         else:
-            verdict = f"<span style='color:{DIM};'>≈ Équilibré au-dessus / en dessous</span>"
+            verdict = f"<span style='color:{DIM};'>≈ Achat / vente équilibrés</span>"
         summ.setText(
-            f"<span style='color:{RED};'>Résistance (au-dessus) : {above/1e6:.1f} M$</span>"
-            f"   ·   <span style='color:{GREEN};'>Support (en dessous) : {below/1e6:.1f} M$</span>"
-            f"   ·   {verdict}")
+            f"<span style='color:{GREEN};'>Murs d'ACHAT (support) : {buy/1e6:.1f} M$</span>"
+            f"   ·   <span style='color:{RED};'>Murs de VENTE (résistance) : {sell/1e6:.1f} M$</span>"
+            f"   ·   {verdict}"
+            f"<br><span style='color:{DIM};font-size:11px;'>Coloré par CÔTÉ du mur (pas par "
+            f"position). ⚠ = mur à contre-position (achat au-dessus / vente en dessous du prix).</span>")
 
     def _refresh_walls(self):
         import time as _t
