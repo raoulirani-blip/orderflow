@@ -1053,11 +1053,14 @@ class Cockpit(QtWidgets.QMainWindow):
             return 1.0
 
     def _wallmap_resize_bars(self, plt):
-        """Réajuste l'épaisseur des barres quand on zoome (centrées sur leur prix)."""
+        """Réajuste l'épaisseur des barres quand on zoome (centrées sur leur prix).
+        Chaque entrée = (bar, centres[, facteur_hauteur])."""
         h = self._wm_bar_height(plt)
-        for bg, centers in getattr(plt, "_wm_items", []):
+        for entry in getattr(plt, "_wm_items", []):
+            bg, centers = entry[0], entry[1]
+            f = entry[2] if len(entry) > 2 else 0.5
             try:
-                bg.setOpts(y0=[c - h / 2 for c in centers], y1=[c + h / 2 for c in centers])
+                bg.setOpts(y0=[c - h * f for c in centers], y1=[c + h * f for c in centers])
             except Exception:
                 pass
 
@@ -1071,6 +1074,10 @@ class Cockpit(QtWidgets.QMainWindow):
             return
         above = below = buy = sell = 0.0
         maxm = (max(x["usd"] for x in walls) / 1e6) or 1.0
+        # les 3 murs les plus TENACES (plus longue durée de vie) -> mis en valeur (orange)
+        by_life = sorted(walls, key=lambda x: x.get("lifespan", 0) or 0, reverse=True)
+        tenaces = {(round(x["price"], 1), x.get("side"))
+                   for x in by_life[:3] if (x.get("lifespan", 0) or 0) > 0}
         bids = []; asks = []                       # (prix, taille M$)
         for x in walls:
             price = x["price"]; m_usd = x["usd"] / 1e6
@@ -1082,7 +1089,12 @@ class Cockpit(QtWidgets.QMainWindow):
             sell += x["usd"] if not is_bid else 0.0
             tag = "ACHAT" if is_bid else "VENTE"; tagcol = GREEN if is_bid else RED
             odd = " ⚠" if (is_bid and price > mid) or (not is_bid and price < mid) else ""
-            txt = pg.TextItem(html=f"<span style='font-size:8pt;color:{tagcol};font-weight:700;'>"
+            # étiquette « tenace » : durée de vie mise en avant en orange
+            tnc = (round(price, 1), x.get("side")) in tenaces
+            life_html = (f"<span style='font-size:8pt;color:{AMBER};font-weight:800;'>"
+                         f"⏱{(x.get('lifespan', 0) or 0)/60:.0f}min </span>") if tnc else ""
+            txt = pg.TextItem(html=f"{life_html}"
+                                   f"<span style='font-size:8pt;color:{tagcol};font-weight:700;'>"
                                    f"{m_usd:.1f}M {tag}{odd}</span> "
                                    f"<span style='font-size:8pt;color:{DIM};'>{price:,.0f}</span>",
                               anchor=(0, 0.5))
@@ -1103,6 +1115,14 @@ class Cockpit(QtWidgets.QMainWindow):
             bg = pg.BarGraphItem(x0=0, width=ws, y0=[p - h / 2 for p in ys],
                                  y1=[p + h / 2 for p in ys], brush=col, pen=None)
             plt.addItem(bg); items.append(bg); plt._wm_items.append((bg, ys))
+        # contour ORANGE épais sur les 3 murs les plus tenaces (par-dessus la couleur de côté)
+        for x in by_life[:3]:
+            if (x.get("lifespan", 0) or 0) <= 0:
+                continue
+            p = x["price"]; mm = x["usd"] / 1e6
+            ob = pg.BarGraphItem(x0=0, width=mm, y0=p - h * 0.9, y1=p + h * 0.9,
+                                 brush=None, pen=pg.mkPen(AMBER, width=3))
+            plt.addItem(ob); items.append(ob); plt._wm_items.append((ob, [p], 0.9))
         pl = pg.InfiniteLine(pos=mid, angle=0,
                              pen=pg.mkPen("#00e5ff", width=1.6, style=QtCore.Qt.PenStyle.DashLine),
                              label=f"prix {mid:,.0f}",
