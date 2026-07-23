@@ -1026,7 +1026,10 @@ class Cockpit(QtWidgets.QMainWindow):
             elif ci == 3:
                 walls = cats.get("invalide", []) + cats.get("spoof", []); catname = "INVALIDÉS"
             else:
-                walls = rep.get("top", []); catname = "TOUS"
+                # TOUS = toutes les catégories combinées (PAS le tri proximité/taille)
+                walls = (cats.get("actif", []) + cats.get("valide", [])
+                         + cats.get("invalide", []) + cats.get("spoof", [])
+                         + cats.get("disparu", [])); catname = "TOUS"
             lbl = self.WALL_WIN_LABELS.get(m, f"{m} min")
             dlg.setWindowTitle(f"Carte des murs — {lbl} · {catname}")
             # change de fenêtre/catégorie -> on recadre ; sinon on garde ton zoom
