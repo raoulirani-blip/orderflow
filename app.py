@@ -3387,11 +3387,25 @@ class Cockpit(QtWidgets.QMainWindow):
             c.setStyleSheet(f"QComboBox{{background:{PANEL};border:1px solid {BORDER};"
                             f"border-radius:8px;color:{TXT};padding:6px 12px;font-weight:700;}}")
             return c
-        lbl0 = QtWidgets.QLabel("MODE :"); lbl0.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        lblw = QtWidgets.QLabel("PÉRIODE :"); lblw.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        ctrl.addWidget(lblw)
+        # Live = trades réels (tick, 4H). Historique = klines Binance (jours -> mois).
+        # -> (interval kline fine, tf d'une bougie affichée en s, nb de klines)
+        self.FP_WINDOWS_LONG = {
+            "1 jour":     ("5m", 900, 288),
+            "3 jours":    ("15m", 3600, 288),
+            "1 semaine":  ("15m", 7200, 672),
+            "2 semaines": ("30m", 14400, 672),
+            "1 mois":     ("1h", 43200, 720),
+        }
+        self.fp_window = combo(["Live (4H réel)"] + list(self.FP_WINDOWS_LONG.keys()),
+                               "Live (4H réel)")
+        ctrl.addWidget(self.fp_window)
+        lbl0 = QtWidgets.QLabel("  MODE :"); lbl0.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl0)
         self.fp_mode = combo(["Vente × Achat", "Δ net (delta)"], "Vente × Achat")
         ctrl.addWidget(self.fp_mode)
-        lbl = QtWidgets.QLabel("  BOUGIE :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        lbl = QtWidgets.QLabel("  BOUGIE (live) :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl)
         self.fp_tf = combo(["1 min", "2 min", "5 min"], "1 min")
         ctrl.addWidget(self.fp_tf)
@@ -3458,24 +3472,53 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.addLayout(body, 1)
         self._fp_page = page
 
+        self.fp_window.currentIndexChanged.connect(self._refresh_footprint)
         self._fp_timer = QtCore.QTimer(self)
         self._fp_timer.timeout.connect(self._refresh_footprint)
         self._fp_timer.start(2000)
         return page
 
-    def _refresh_footprint(self):
+    def _refresh_footprint(self, *args):
         # ne travaille que si la page est visible (zéro coût sinon)
         if self.tabs.currentWidget() is not getattr(self, "_fp_page", None):
             return
-        import time as _t
-        tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
+        import time as _t, threading
         bucket = float(self.fp_bucket.currentText().replace("$", "").strip())
-        n_bars = min(80, max(20, int(4 * 3600 / tf)))      # ~4H (cap 80 col pour la fluidité)
-        fp = self.engine.get_footprint(tf, bucket, n_bars=n_bars)
-        bars = fp["bars"]
-        if not bars:
-            self.fp_status.setText("· pré-chargement des trades (4H) en cours…")
-            return
+        win = self.fp_window.currentText()
+        if win not in self.FP_WINDOWS_LONG:
+            # ---- LIVE : footprint tick réel (4H) ----
+            tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
+            n_bars = min(80, max(20, int(4 * 3600 / tf)))
+            fp = self.engine.get_footprint(tf, bucket, n_bars=n_bars)
+            bars = fp["bars"]
+            if not bars:
+                self.fp_status.setText("· pré-chargement des trades (4H) en cours…")
+                return
+        else:
+            # ---- HISTORIQUE : footprint depuis les klines Binance (jours -> mois) ----
+            fine, disp_tf, limit = self.FP_WINDOWS_LONG[win]
+            tf = disp_tf
+            if not hasattr(self, "_fpL"):
+                self._fpL = {}; self._fpL_loading = set()
+            key = (win, bucket)
+            entry = self._fpL.get(key)
+            fresh = entry and (_t.time() - entry[0] < 300)
+            if not fresh and key not in self._fpL_loading:
+                self._fpL_loading.add(key)
+
+                def _load(k=key, iv=fine, dt=disp_tf, lm=limit, bk=bucket):
+                    try:
+                        data = self.engine.get_footprint_klines(iv, dt, lm, bk)
+                    except Exception:
+                        data = None
+                    self._fpL[k] = (_t.time(), data)
+                    self._fpL_loading.discard(k)
+                threading.Thread(target=_load, daemon=True).start()
+            fp = entry[1] if entry else None
+            if not fp or not fp.get("bars"):
+                self.fp_status.setText(f"· {win} — chargement des klines Binance…")
+                return
+            bars = fp["bars"]
         n = len(bars)
         span_min = (bars[-1]["t0"] - bars[0]["t0"]) / 60 + tf / 60
         tot_trades = sum(b["buy"] + b["sell"] for b in bars)

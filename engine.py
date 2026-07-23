@@ -1383,6 +1383,54 @@ class OrderFlowEngine:
         bars = [self._fp_bars[k] for k in sorted(self._fp_bars)][-n_bars:]
         return {"bars": bars, "tf": tf_s, "bucket": bucket}
 
+    def get_footprint_klines(self, fine_interval="5m", display_tf_s=3600,
+                             limit=1000, bucket=20.0):
+        """FOOTPRINT HISTORIQUE (jours -> mois) construit depuis les klines Binance.
+        Chaque bougie affichée (display_tf_s) agrège des klines FINES ; le volume
+        achat/vente de chaque kline fine est réparti sur les niveaux [low, high] qu'elle
+        a traversés -> cellules achat×vente par niveau. Approximation à la granularité
+        de la kline fine (pas du tick), mais remonte à des semaines/mois côté trades."""
+        from connectors import fetch_klines
+        try:
+            kl = fetch_klines(self.symbol, interval=fine_interval, limit=limit)
+        except Exception:
+            return None
+        if not isinstance(kl, list) or not kl:
+            return None
+        bars = {}
+        for k in kl:
+            try:
+                t0k = k[0] / 1000.0
+                h = float(k[2]); l = float(k[3]); c = float(k[4])
+                v = float(k[5]); bv = float(k[9])
+            except (IndexError, ValueError, TypeError):
+                continue
+            if v <= 0 or h < l:
+                continue
+            sv = max(0.0, v - bv)
+            b0 = int(t0k // display_tf_s) * display_tf_s
+            bar = bars.get(b0)
+            if bar is None:
+                bar = bars[b0] = {"t0": b0, "o": float(k[1]), "h": h, "l": l, "c": c,
+                                  "cells": {}, "buy": 0.0, "sell": 0.0, "big": []}
+            lo_b = round(l / bucket) * bucket
+            hi_b = round(h / bucket) * bucket
+            nb = int(round((hi_b - lo_b) / bucket)) + 1
+            if nb < 1:
+                nb = 1
+            fb, fs = bv / nb, sv / nb
+            for i in range(nb):
+                cell = bar["cells"].setdefault(lo_b + i * bucket, [0.0, 0.0])
+                cell[0] += fb; cell[1] += fs
+            bar["buy"] += bv; bar["sell"] += sv
+            if h > bar["h"]:
+                bar["h"] = h
+            if l < bar["l"]:
+                bar["l"] = l
+            bar["c"] = c            # klines chronologiques -> dernière clôture du groupe
+        out = [bars[key] for key in sorted(bars)]
+        return {"bars": out, "tf": display_tf_s, "bucket": bucket}
+
     def get_liq_clusters(self, window_s=3600, bucket=50.0):
         """AIMANTS DE LIQUIDATION : regroupe les liquidations RÉELLES reçues (Bybit)
         par niveau de prix. Une zone où beaucoup de longs (ou shorts) se sont fait
