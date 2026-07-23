@@ -995,7 +995,9 @@ class Cockpit(QtWidgets.QMainWindow):
         plt.getAxis("left").setTextPen(pg.mkColor(TXT))
         plt.getAxis("bottom").setTextPen(pg.mkColor(DIM))
         plt.getAxis("left").setWidth(74); plt.setLabel("bottom", "taille du mur (M$)")
-        plt.setMouseEnabled(x=True, y=True)          # molette = zoom, glisser = déplacer
+        # zoom/déplacement UNIQUEMENT sur le prix (Y). L'axe X (taille) reste verrouillé
+        # de 0 à la taille max -> on voit toujours la barre EN ENTIER.
+        plt.setMouseEnabled(x=False, y=True)
         plt._wm_items = []
         # quand on zoome en Y, on affine l'épaisseur des barres (constante à l'écran)
         plt.getViewBox().sigYRangeChanged.connect(lambda *_: self._wallmap_resize_bars(plt))
@@ -1086,12 +1088,13 @@ class Cockpit(QtWidgets.QMainWindow):
                               anchor=(0, 0.5))
             txt.setPos(m_usd * 1.02, price)
             plt.addItem(txt); items.append(txt)
-        # recadrage éventuel AVANT de dimensionner les barres (l'épaisseur suit la vue)
-        if reset:
+        # X (taille du mur) TOUJOURS plein : de 0 à la taille max -> barre toujours
+        # visible en entier, même quand tu zoomes sur le prix.
+        plt.setXRange(0, maxm * 1.32, padding=0)
+        if reset:                              # Y (prix) : seulement au recadrage (ton zoom tient)
             prices = [p for p, _ in bids + asks] + [mid]
             pad = (max(prices) - min(prices)) * 0.06 + mid * 0.0008
             plt.setYRange(min(prices) - pad, max(prices) + pad, padding=0)
-            plt.setXRange(0, maxm * 1.20, padding=0)
         h = self._wm_bar_height(plt)
         for group, col in ((bids, (46, 194, 126)), (asks, (205, 76, 88))):
             if not group:
