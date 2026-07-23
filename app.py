@@ -2074,6 +2074,7 @@ class Cockpit(QtWidgets.QMainWindow):
         self.calc_entry   = self._calc_input(st.get("entry", ""))       # prix d'entrée
         self.calc_sl      = self._calc_input(st.get("sl", ""))          # prix du stop
         self.calc_tp      = self._calc_input(st.get("tp", ""))          # prix take profit
+        self.calc_spread  = self._calc_input(st.get("spread", "0"))     # spread CFI ($)
         self.calc_side    = QtWidgets.QComboBox()
         self.calc_side.addItems(["Long", "Short"])
         self.calc_side.setCurrentText(st.get("side", "Long"))
@@ -2090,6 +2091,7 @@ class Cockpit(QtWidgets.QMainWindow):
         form.addRow(flbl("Prix d'entrée BTC ($)"), self.calc_entry)
         form.addRow(flbl("Prix du Stop Loss ($)"), self.calc_sl)
         form.addRow(flbl("Prix Take Profit ($) — optionnel"), self.calc_tp)
+        form.addRow(flbl("Spread CFI ($) — coût d'exécution"), self.calc_spread)
         form.addRow(flbl("Sens du trade"), self.calc_side)
         inbox.addLayout(form)
         inbox.addStretch(1)
@@ -2098,7 +2100,7 @@ class Cockpit(QtWidgets.QMainWindow):
         # ----- colonne RÉSULTATS -----
         outbox = QtWidgets.QVBoxLayout(); outbox.setSpacing(8)
         outbox.addWidget(self._h("RÉSULTATS DU CALCULATEUR"))
-        self.calc_table = QtWidgets.QTableWidget(10, 2)
+        self.calc_table = QtWidgets.QTableWidget(11, 2)
         self.calc_table.setHorizontalHeaderLabels(["Indicateur", "Valeur"])
         self._prep(self.calc_table)
         self.calc_table.verticalHeader().setDefaultSectionSize(38)
@@ -2133,9 +2135,10 @@ class Cockpit(QtWidgets.QMainWindow):
         # rangées fixes du tableau résultats
         self._calc_rows = [
             "Montant risqué ($)", "Taille de position (BTC)", "Valeur de la position ($)",
-            "Levier utilisé (x)", "Distance du Stop Loss ($)", "Distance du Take Profit ($/BTC)",
-            "Ratio Risque/Récompense (R:R)", "% du capital utilisé (marge)",
-            "Gain au Take Profit ($)", "Gain au Take Profit (% capital)",
+            "Levier utilisé (x)", "Distance du Stop Loss ($)",
+            "Risque RÉEL par BTC — SL + spread ($)", "Distance du Take Profit ($)",
+            "Ratio Risque/Récompense RÉEL (R:R)", "% du capital utilisé (marge)",
+            "Gain net au Take Profit ($)", "Gain au Take Profit (% capital)",
         ]
         for i, name in enumerate(self._calc_rows):
             it = QtWidgets.QTableWidgetItem(name)
@@ -2157,16 +2160,20 @@ class Cockpit(QtWidgets.QMainWindow):
         sl_price = num(self.calc_sl)          # PRIX du stop (plus la distance)
         entry = num(self.calc_entry)
         tp    = num(self.calc_tp)
+        spread = num(self.calc_spread) or 0.0   # spread CFI (coût d'exécution)
         is_long = self.calc_side.currentText() == "Long"
-        # distance du stop = écart entre l'entrée et le prix du stop
+        # distance nominale du stop, PUIS distance de risque RÉELLE (spread inclus) :
+        # tu entres à l'ask et sors au bid -> le spread s'ajoute à ta perte réelle.
         sld = abs(entry - sl_price) if (entry is not None and sl_price is not None) else None
+        sld_real = (sld + spread) if sld is not None else None
 
         vals = ["—"] * len(self._calc_rows)
         cols = [TXT] * len(self._calc_rows)
 
         risk_frac = (risk / 100.0) if risk is not None else None
         risk_amt = cap * risk_frac if (cap is not None and risk_frac is not None) else None
-        size = (risk_amt / sld) if (risk_amt is not None and sld) else None
+        # la TAILLE se calcule sur le risque RÉEL (SL + spread) -> money management juste
+        size = (risk_amt / sld_real) if (risk_amt is not None and sld_real) else None
 
         if risk_amt is not None:
             vals[0] = f"{risk_amt:,.2f} $"
@@ -2179,20 +2186,25 @@ class Cockpit(QtWidgets.QMainWindow):
         if lev is not None:
             vals[3] = f"{lev:.2f} x"; cols[3] = AMBER if lev > 1 else TXT
         if sld is not None:
-            vals[4] = f"{sld:,.0f} $"; cols[4] = RED
+            vals[4] = f"{sld:,.0f} $"; cols[4] = DIM
+        if sld_real is not None:
+            extra = f"  (+{spread:.0f} spread)" if spread else ""
+            vals[5] = f"{sld_real:,.0f} ${extra}"; cols[5] = RED
         dist_tp = abs(tp - entry) if (tp and entry) else None
+        # le spread ampute aussi le gain (tu sors du bon côté du spread)
+        dist_tp_net = max(0.0, dist_tp - spread) if dist_tp is not None else None
         if dist_tp is not None:
-            vals[5] = f"{dist_tp:,.0f} $"
-        rr = dist_tp / sld if (dist_tp is not None and sld) else None
+            vals[6] = f"{dist_tp:,.0f} $"
+        rr = dist_tp_net / sld_real if (dist_tp_net is not None and sld_real) else None
         if rr is not None:
-            vals[6] = f"{rr:.2f} : 1"; cols[6] = GREEN if rr >= 2 else (AMBER if rr >= 1 else RED)
+            vals[7] = f"{rr:.2f} : 1"; cols[7] = GREEN if rr >= 2 else (AMBER if rr >= 1 else RED)
         if lev is not None:
-            vals[7] = f"{lev*100:.1f} %"
-        gain_tp = dist_tp * size if (dist_tp is not None and size is not None) else None
+            vals[8] = f"{lev*100:.1f} %"
+        gain_tp = dist_tp_net * size if (dist_tp_net is not None and size is not None) else None
         if gain_tp is not None:
-            vals[8] = f"{gain_tp:,.2f} $"; cols[8] = GREEN
+            vals[9] = f"{gain_tp:,.2f} $"; cols[9] = GREEN
         if gain_tp is not None and cap:
-            vals[9] = f"{gain_tp/cap*100:.2f} %"; cols[9] = GREEN
+            vals[10] = f"{gain_tp/cap*100:.2f} %"; cols[10] = GREEN
 
         for i, (v, c) in enumerate(zip(vals, cols)):
             it = QtWidgets.QTableWidgetItem(v)
@@ -2249,7 +2261,8 @@ class Cockpit(QtWidgets.QMainWindow):
                 "side": self.calc_side.currentText(),
                 "entry": self.calc_entry.text().strip(),
                 "sl": self.calc_sl.text().strip(),
-                "tp": self.calc_tp.text().strip()}
+                "tp": self.calc_tp.text().strip(),
+                "spread": self.calc_spread.text().strip()}
         try:
             with open(self._calc_settings_path(), "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -2277,8 +2290,14 @@ class Cockpit(QtWidgets.QMainWindow):
             self._calc_flash("⚠️ Entre au moins le prix d'entrée et le prix du stop "
                              "pour envoyer le trade au Journal.", RED)
             return
-        sld = abs(entry - sl_price)
-        size = (cap * (risk / 100.0) / sld) if (cap is not None and risk is not None and sld) else None
+        def _n(w):
+            try:
+                return float(str(w.text()).replace(",", ".").replace(" ", "").replace("$", ""))
+            except (ValueError, AttributeError):
+                return None
+        spread = _n(self.calc_spread) or 0.0
+        sld_real = abs(entry - sl_price) + spread          # risque réel (spread inclus)
+        size = (cap * (risk / 100.0) / sld_real) if (cap is not None and risk is not None and sld_real) else None
         rec = {
             "date": _t.strftime("%Y-%m-%d %H:%M:%S"),
             "side": "Long" if is_long else "Short",
