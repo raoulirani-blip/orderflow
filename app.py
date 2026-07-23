@@ -1811,13 +1811,19 @@ class Cockpit(QtWidgets.QMainWindow):
         self.prof_fp.scene().sigMouseMoved.connect(self._prof_mouse)
         outer.addWidget(self.prof_fp, 1)
 
-        # bandeau de lecture du niveau survolé
-        self.prof_hover = QtWidgets.QLabel("Survole un niveau du profil pour voir "
-                                           "prix · achat · vente · delta · total.")
+        # deux bandeaux : SURVOL (à gauche, le prix que tu choisis) + PRIX ACTUEL (à droite)
+        hb = QtWidgets.QHBoxLayout(); hb.setSpacing(8)
+        self.prof_hover = QtWidgets.QLabel("Survole un niveau → prix · achat · vente · delta · total.")
         self.prof_hover.setStyleSheet(
             f"color:{TXT};font-size:13px;font-weight:700;background:{PANEL2};"
             f"border:1px solid {BORDER};border-radius:8px;padding:8px 12px;")
-        outer.addWidget(self.prof_hover)
+        self.prof_now = QtWidgets.QLabel("Prix actuel — …")
+        self.prof_now.setStyleSheet(
+            f"color:{TXT};font-size:13px;font-weight:700;background:{PANEL2};"
+            f"border:1px solid #00e5ff;border-radius:8px;padding:8px 12px;")
+        hb.addWidget(self.prof_hover, 1)
+        hb.addWidget(self.prof_now, 1)
+        outer.addLayout(hb)
         return page
 
     def _prof_mouse(self, pos):
@@ -1946,6 +1952,22 @@ class Cockpit(QtWidgets.QMainWindow):
             plt.addItem(txt); self._prof_fp_items.append(txt)
         pad = (hi - lo) * 0.04 + bucket
         plt.setYRange(lo - pad, hi + pad, padding=0)
+
+        # bandeau PRIX ACTUEL (à droite) : mêmes données que le survol, au prix live
+        if hasattr(self, "prof_now"):
+            live = (self._last_state or {}).get("mid") or mid
+            if live and cells:
+                lvl = round(live / bucket) * bucket
+                d = cells.get(lvl) or cells.get(min(cells, key=lambda k: abs(k - live)))
+                if d:
+                    b = d.get("buy", 0.0); s = d.get("sell", 0.0); tot = b + s
+                    dl = b - s; dcol = GREEN if dl >= 0 else RED
+                    self.prof_now.setText(
+                        f"<span style='color:#00e5ff;font-weight:800;'>PRIX ACTUEL {live:,.0f} $</span>   "
+                        f"<span style='color:{ACCENT};'>achat {b:,.0f}</span> · "
+                        f"<span style='color:{RED};'>vente {s:,.0f}</span> · "
+                        f"<span style='color:{dcol};font-weight:800;'>delta {dl:+,.0f}</span> · "
+                        f"<span style='color:{TXT};'>total {tot:,.0f} BTC</span>")
 
     def _refresh_profil(self, *args):
         import time as _t, threading
