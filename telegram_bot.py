@@ -44,11 +44,15 @@ class TelegramCopilotBot:
 
     def send(self, text):
         if not self.token or not self.chat_id:
+            print("[Telegram] envoi annulé (token ou chat_id manquant)")
             return
         try:
-            self._api("sendMessage", chat_id=self.chat_id, text=text)
-        except Exception:
-            pass
+            r = self._api("sendMessage", chat_id=self.chat_id, text=text)
+            j = r.json()
+            if not j.get("ok"):
+                print(f"[Telegram] sendMessage KO: {j.get('description')}")
+        except Exception as e:
+            print(f"[Telegram] sendMessage erreur: {e}")
 
     def send_photo(self, png_bytes, caption=""):
         """Envoie une IMAGE (graphique) sur Telegram — cliquable/zoomable."""
@@ -88,12 +92,32 @@ class TelegramCopilotBot:
                     params["offset"] = self._offset
                 r = requests.get(f"https://api.telegram.org/bot{self.token}/getUpdates",
                                  params=params, timeout=35)
-                for upd in r.json().get("result", []):
+                data = r.json()
+                if not data.get("ok"):
+                    # 409 Conflict = un AUTRE process interroge le même bot (ex : l'appli
+                    # ET le serveur en même temps) -> le bot devient muet/erratique.
+                    print(f"[Telegram] getUpdates KO: {data.get('description')}")
+                    time.sleep(3)
+                    continue
+                for upd in data.get("result", []):
                     self._offset = upd["update_id"] + 1
                     msg = upd.get("message") or upd.get("edited_message") or {}
                     chat = str(msg.get("chat", {}).get("id", ""))
                     text = (msg.get("text") or "").strip()
                     if not text:
+                        continue
+                    # /start : (RE)apprend TOUJOURS le chat courant -> permet de récupérer
+                    # un chat_id périmé (sinon le bot ignore le vrai utilisateur en silence).
+                    if text.lower() in ("/start", "start"):
+                        if chat and chat != self.chat_id:
+                            self.chat_id = chat
+                            if self.on_learn_chat:
+                                try:
+                                    self.on_learn_chat(chat)
+                                except Exception:
+                                    pass
+                        self.send("👋 Copilote Order Flow connecté. Pose-moi tes questions "
+                                  "sur le marché, je réponds avec les données live du cockpit.")
                         continue
                     if not self.chat_id:            # apprentissage auto du 1er contact
                         self.chat_id = chat
@@ -103,11 +127,10 @@ class TelegramCopilotBot:
                             except Exception:
                                 pass
                     if self.chat_id and chat != self.chat_id:
-                        continue                    # ignore les autres expéditeurs
-                    if text.lower() in ("/start", "start"):
-                        self.send("👋 Copilote Order Flow connecté. Pose-moi tes questions "
-                                  "sur le marché, je réponds avec les données live du cockpit.")
+                        print(f"[Telegram] message IGNORÉ (chat {chat} ≠ {self.chat_id}) "
+                              f"— envoie /start depuis ce chat pour le relier.")
                         continue
+                    print(f"[Telegram] question reçue: {text[:60]}")
                     try:
                         reply = self.on_question(text)
                     except Exception as e:
@@ -115,5 +138,6 @@ class TelegramCopilotBot:
                     if reply:
                         # Telegram limite à 4096 caractères par message
                         self.send(reply[:4000])
-            except Exception:
+            except Exception as e:
+                print(f"[Telegram] boucle erreur: {e}")
                 time.sleep(3)      # réseau coupé : on réessaie doucement

@@ -1431,6 +1431,47 @@ class OrderFlowEngine:
         out = [bars[key] for key in sorted(bars)]
         return {"bars": out, "tf": display_tf_s, "bucket": bucket}
 
+    def get_short_vol(self, recent_min=30, step_s=10):
+        """Volatilité réalisée COURT TERME depuis les VRAIS trades tick (trades_hist —
+        les mêmes données que le footprint live), échantillonnés toutes les `step_s`
+        secondes (dernier prix de chaque tranche) pour éviter le bruit de microstructure.
+        Écart-type des log-returns -> projeté sur 5/10/15 min par la règle racine-du-temps.
+        C'est une PROJECTION (pas une IV implicite) mais fondée sur du tick 100% réel.
+        Aucune kline, aucun réseau. Régime = vol des 30 dernières min vs vol de fond."""
+        import math
+        import statistics
+        with self.agg._lock:
+            trades = [(t[0], t[1]) for t in self.agg.trades_hist]   # (ts, prix) réels
+        if len(trades) < 30:
+            return None
+        now = trades[-1][0]
+        # échantillonne le DERNIER prix de chaque tranche de step_s secondes
+        samples = {}
+        for ts, price in trades:
+            samples[int(ts // step_s)] = price      # trades chronologiques -> dernier gagne
+        buckets = sorted(samples)
+        if len(buckets) < 15:
+            return None
+        rets = [(math.log(samples[buckets[i]] / samples[buckets[i - 1]]), buckets[i] * step_s)
+                for i in range(1, len(buckets)) if samples[buckets[i - 1]] > 0]
+        if len(rets) < 10:
+            return None
+        cut = now - recent_min * 60
+        recent = [r for r, t in rets if t >= cut] or [r for r, _t in rets]
+        allr = [r for r, _t in rets]
+        sig_step = statistics.pstdev(recent) if len(recent) > 1 else 0.0
+        sig_base = statistics.pstdev(allr) if len(allr) > 1 else sig_step
+        per_min = 60.0 / step_s                       # nb d'échantillons par minute
+        sig_1m = sig_step * math.sqrt(per_min)        # vol par minute
+        price = samples[buckets[-1]]
+        ratio = (sig_step / sig_base) if sig_base > 1e-12 else 1.0
+        return {"price": price, "sigma_1m_pct": sig_1m * 100.0,
+                "move_5": price * sig_1m * math.sqrt(5),
+                "move_10": price * sig_1m * math.sqrt(10),
+                "move_15": price * sig_1m * math.sqrt(15),
+                "pct_10": sig_1m * math.sqrt(10) * 100.0,
+                "ratio": ratio, "n": len(buckets)}
+
     def get_liq_clusters(self, window_s=3600, bucket=50.0):
         """AIMANTS DE LIQUIDATION : regroupe les liquidations RÉELLES reçues (Bybit)
         par niveau de prix. Une zone où beaucoup de longs (ou shorts) se sont fait

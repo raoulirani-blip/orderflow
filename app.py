@@ -1444,6 +1444,10 @@ class Cockpit(QtWidgets.QMainWindow):
             cap.setStyleSheet(f"color:{DIM};font-size:10px;font-weight:700;letter-spacing:1px;border:none;")
             val = QtWidgets.QLabel("—")
             val.setStyleSheet(f"color:{TXT};font-size:26px;font-weight:800;border:none;")
+            # chrono : temps depuis le dernier retournement du CVD (rouge <60s, vert >60s)
+            chrono = QtWidgets.QLabel("")
+            chrono.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            chrono.setStyleSheet(f"color:{DIM};font-size:13px;font-weight:800;border:none;")
             agg_lbl = QtWidgets.QLabel("Agresseurs : —")
             agg_lbl.setStyleSheet(f"color:{TXT};font-size:12px;font-weight:700;border:none;")
             bar = QtWidgets.QProgressBar()
@@ -1454,11 +1458,14 @@ class Cockpit(QtWidgets.QMainWindow):
             detail.setStyleSheet(f"color:{DIM};font-size:11px;border:none;")
             accel = QtWidgets.QLabel("")
             accel.setStyleSheet(f"color:{AMBER};font-size:11px;font-weight:700;border:none;")
-            bl.addWidget(cap); bl.addWidget(val); bl.addWidget(agg_lbl); bl.addWidget(bar)
+            bl.addWidget(cap); bl.addWidget(val)
+            bl.addWidget(agg_lbl); bl.addWidget(bar)
             bl.addWidget(detail); bl.addWidget(accel)
-            bl.addStretch(1)   # colle le contenu en haut, supprime le vide au milieu
+            bl.addStretch(1)   # colle le contenu en haut
+            # chrono en BAS de la case, centré horizontalement
+            bl.addWidget(chrono, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
             cvd_row.addWidget(box, 1)
-            self.cvd_boxes[m] = {"box": box, "val": val, "detail": detail,
+            self.cvd_boxes[m] = {"box": box, "val": val, "detail": detail, "chrono": chrono,
                                  "accel": accel, "agg": agg_lbl, "bar": bar}
         outer.addLayout(cvd_row, 1)
         return page
@@ -1520,11 +1527,21 @@ class Cockpit(QtWidgets.QMainWindow):
             f"QFrame{{background:{PANEL};border:2px solid {border};border-radius:14px;}}")
 
         # CVD multi-fenêtres
+        import time as _t
+        if not hasattr(self, "_cvd_flip"):
+            self._cvd_flip = {}          # m -> {"sign": +1/-1, "ts": t du dernier retournement}
+        # seuil "tenu" (vert) par fenêtre, en secondes (calé sur des entrées rapides).
+        CVD_HOLD = {1: 60, 5: 75, 15: 90, 30: 120}
+
+        def _fmt_s(s):
+            s = int(s); mm, ss = divmod(s, 60)
+            return f"{mm}m{ss:02d}" if mm else f"{ss}s"
         cvds = self.engine.get_cvd_windows()
         for m, w in self.cvd_boxes.items():
             d = cvds.get(m, {})
             if not d.get("ready"):
                 w["val"].setText("—")
+                w["chrono"].setText("")
                 w["agg"].setText("Agresseurs : —")
                 w["bar"].setValue(500)
                 w["detail"].setText(f"Pas encore assez de données ({m} min)")
@@ -1536,6 +1553,22 @@ class Cockpit(QtWidgets.QMainWindow):
             col = GREEN if cvd >= 0 else RED
             w["val"].setText(f"{cvd:+.1f}")
             w["val"].setStyleSheet(f"color:{col};font-size:26px;font-weight:800;border:none;")
+
+            # --- CHRONO : temps depuis le dernier retournement (flip) du CVD ---
+            sign = 1 if cvd >= 0 else -1
+            fl = self._cvd_flip.get(m)
+            if fl is None or fl["sign"] != sign:
+                fl = self._cvd_flip[m] = {"sign": sign, "ts": _t.time()}
+            elapsed = _t.time() - fl["ts"]
+            thresh = CVD_HOLD.get(m, 60)
+            arrow = "▲" if sign > 0 else "▼"
+            live_txt = f"{_fmt_s(elapsed)} / {_fmt_s(thresh)}"   # temps live / cible
+            if elapsed >= thresh:
+                w["chrono"].setText(f"⏱ {arrow} {live_txt} tenu")
+                w["chrono"].setStyleSheet(f"color:{GREEN};font-size:13px;font-weight:800;border:none;")
+            else:
+                w["chrono"].setText(f"⏱ {arrow} {live_txt}")
+                w["chrono"].setStyleSheet(f"color:{RED};font-size:13px;font-weight:800;border:none;")
 
             bv = d["buy_vol"]; sv = d["sell_vol"]; tot = bv + sv
             ratio = bv / tot if tot else 0.5
@@ -1732,7 +1765,8 @@ class Cockpit(QtWidgets.QMainWindow):
                                   "1 semaine": ("30m", 336), "2 semaines": ("1h", 336),
                                   "1 mois": ("2h", 360)}
         # résolution -> (target_levels pour klines, bucket $ pour fenêtres courtes)
-        self.PROF_RES = {"Auto": (110, 10.0), "Fine": (190, 5.0), "Large": (65, 25.0)}
+        # Auto élargi (15$) : moins de trous (niveaux vides) tout en gardant du détail.
+        self.PROF_RES = {"Auto": (90, 15.0), "Fine": (190, 5.0), "Large": (65, 25.0)}
 
         # ---- barre d'options ----
         wrow = QtWidgets.QHBoxLayout(); wrow.setSpacing(8)
@@ -3185,15 +3219,14 @@ class Cockpit(QtWidgets.QMainWindow):
         return box
 
     def _build_quant_page(self):
-        from quant import MACRO_SYMBOLS
         page = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(page)
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(14)
 
         intro = QtWidgets.QLabel(
             "Quant : le contexte au-delà de l'order flow. OPTIONS (Deribit) = comment le marché "
-            "price le risque et vers quel prix l'expiration attire. MACRO = le vent de fond "
-            "(actions, dollar, peur) qui pousse ou freine BTC.")
+            "price le risque et vers quel prix l'expiration attire. VOLATILITÉ COURT TERME = "
+            "le mouvement attendu (±$) sur 5/10/15 min, calculé sur le tick réel.")
         intro.setWordWrap(True); intro.setStyleSheet(f"color:{DIM};font-size:12px;")
         outer.addWidget(intro)
 
@@ -3220,20 +3253,20 @@ class Cockpit(QtWidgets.QMainWindow):
                                       f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:11px;")
         outer.addWidget(self.q_opt_read)
 
-        # ---- MACRO ----
-        outer.addWidget(self._h("CONTEXTE MACRO  ·  risk-on / risk-off  (ce qui pousse ou freine BTC)"))
-        mgrid = QtWidgets.QGridLayout(); mgrid.setSpacing(10)
-        self.q_macro_cards = {}
-        for i, (name, _sym) in enumerate(MACRO_SYMBOLS):
-            c = self._quant_card(name.upper(), ACCENT)
-            self.q_macro_cards[name] = c
-            mgrid.addWidget(c, i // 3, i % 3)
-        outer.addLayout(mgrid)
-        self.q_macro_read = QtWidgets.QLabel("Chargement macro…")
-        self.q_macro_read.setWordWrap(True)
-        self.q_macro_read.setStyleSheet(f"color:{TXT};font-size:14px;font-weight:700;"
-                                        f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:12px;")
-        outer.addWidget(self.q_macro_read)
+        # ---- VOLATILITÉ COURT TERME (réalisée, projetée) ----
+        outer.addWidget(self._h("VOLATILITÉ COURT TERME  ·  mouvement attendu (réalisé — pas implicite)"))
+        vrow = QtWidgets.QHBoxLayout(); vrow.setSpacing(10)
+        self.q_vol5 = self._quant_card("MOUVEMENT ATTENDU  ·  5 MIN", ACCENT)
+        self.q_vol10 = self._quant_card("MOUVEMENT ATTENDU  ·  10 MIN", ACCENT)
+        self.q_vol15 = self._quant_card("MOUVEMENT ATTENDU  ·  15 MIN", ACCENT)
+        for c in (self.q_vol5, self.q_vol10, self.q_vol15):
+            vrow.addWidget(c, 1)
+        outer.addLayout(vrow)
+        self.q_vol_read = QtWidgets.QLabel("Calcul de la volatilité court terme…")
+        self.q_vol_read.setWordWrap(True)
+        self.q_vol_read.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:600;"
+                                      f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:11px;")
+        outer.addWidget(self.q_vol_read)
 
         # ---- AIMANTS DE LIQUIDATION ----
         outer.addWidget(self._h("AIMANTS DE LIQUIDATION  ·  où le prix est aspiré  (chasse aux liquidations)"))
@@ -3336,32 +3369,6 @@ class Cockpit(QtWidgets.QMainWindow):
             reads.append(f"le marché options « aime » {mp:,.0f} pour l'expi {o['front']} (aimant possible)")
             self.q_opt_read.setText("Lecture : " + "  ·  ".join(reads))
 
-        m = getattr(self, "quant", None) and self.quant.macro
-        if m:
-            for name, c in self.q_macro_cards.items():
-                v = m.get(name)
-                if v and v.get("price") is not None:
-                    c._val.setText(f"{v['price']:,.2f}")
-                    chg = v.get("chg")
-                    col = GREEN if (chg or 0) >= 0 else RED
-                    c._sub.setText(f"{chg:+.2f}% aujourd'hui" if chg is not None else "—")
-                    c._sub.setStyleSheet(f"color:{col};font-size:12px;font-weight:700;border:none;")
-
-            def chg(n):
-                v = m.get(n)
-                return v["chg"] if (v and v.get("chg") is not None) else 0.0
-            score = ((1 if chg("Nasdaq") > 0 else -1) + (1 if chg("S&P 500") > 0 else -1)
-                     + (1 if chg("Dollar (DXY)") < 0 else -1) + (1 if chg("VIX (peur)") < 0 else -1))
-            if score >= 2:
-                self.q_macro_read.setText("🟢 RISK-ON : actions en hausse, dollar/peur en baisse "
-                                          "→ vent porteur pour BTC.")
-            elif score <= -2:
-                self.q_macro_read.setText("🔴 RISK-OFF : actions en baisse, dollar/peur en hausse "
-                                          "→ vent contraire pour BTC.")
-            else:
-                self.q_macro_read.setText("🟡 Macro mitigée : pas de vent de fond marqué pour BTC "
-                                          "(BTC trade surtout sur son propre flux).")
-
         # ---- aimants de liquidation ----
         mid = (self._last_state or {}).get("mid")
         if mid:
@@ -3390,6 +3397,45 @@ class Cockpit(QtWidgets.QMainWindow):
                 it = QtWidgets.QTableWidgetItem(v)
                 it.setForeground(QtGui.QColor(cc))
                 self.q_liq_table.setItem(i, j, it)
+
+        # ---- VOLATILITÉ COURT TERME (fetch réseau en fond, throttlé ~30s) ----
+        import time as _t, threading
+        if not hasattr(self, "_svol"):
+            self._svol = None; self._svol_ts = 0.0; self._svol_loading = False
+        if not self._svol_loading and (_t.time() - self._svol_ts > 10):
+            self._svol_loading = True
+
+            def _load_vol():
+                try:
+                    d = self.engine.get_short_vol()
+                except Exception:
+                    d = None
+                self._svol = d; self._svol_ts = _t.time(); self._svol_loading = False
+            threading.Thread(target=_load_vol, daemon=True).start()
+
+        sv = self._svol
+        if sv:
+            pcts = {5: sv["sigma_1m_pct"] * (5 ** 0.5), 10: sv["pct_10"],
+                    15: sv["sigma_1m_pct"] * (15 ** 0.5)}
+            for card, mv, tt in ((self.q_vol5, sv["move_5"], 5),
+                                 (self.q_vol10, sv["move_10"], 10),
+                                 (self.q_vol15, sv["move_15"], 15)):
+                card._val.setText(f"±{mv:,.0f}$")
+                card._sub.setText(f"≈ {pcts[tt]:.2f}%  ·  ~68% du temps sur {tt} min")
+            ratio = sv["ratio"]
+            if ratio >= 1.5:
+                reg, rc = "🔴 ÉLEVÉE (marché nerveux)", RED
+            elif ratio <= 0.7:
+                reg, rc = "🟢 CALME", GREEN
+            else:
+                reg, rc = "🟡 NORMALE", AMBER
+            self.q_vol_read.setText(
+                f"Régime : {reg}  ·  vol récente (30 min) = {ratio:.1f}× la vol de fond (60 min).  "
+                f"Zone de bruit ~10 min : ±{sv['move_10']:,.0f}$ → un SL plus serré que ça "
+                f"se fait sortir par le simple bruit.  (calcul sur tick réel)")
+            self.q_vol_read.setStyleSheet(
+                f"color:{rc};font-size:13px;font-weight:700;"
+                f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:11px;")
 
     # ===========================================================
     # PAGE OPTIONS — GRAPHIQUES DÉTAILLÉS (Deribit)
@@ -3603,25 +3649,14 @@ class Cockpit(QtWidgets.QMainWindow):
             c.setStyleSheet(f"QComboBox{{background:{PANEL};border:1px solid {BORDER};"
                             f"border-radius:8px;color:{TXT};padding:6px 12px;font-weight:700;}}")
             return c
-        lblw = QtWidgets.QLabel("PÉRIODE :"); lblw.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
-        ctrl.addWidget(lblw)
-        # Live = trades réels (tick, 4H). Historique = klines Binance (jours -> mois).
-        # -> (interval kline fine, tf d'une bougie affichée en s, nb de klines)
-        self.FP_WINDOWS_LONG = {
-            "1 jour":     ("5m", 900, 288),
-            "3 jours":    ("15m", 3600, 288),
-            "1 semaine":  ("15m", 7200, 672),
-            "2 semaines": ("30m", 14400, 672),
-            "1 mois":     ("1h", 43200, 720),
-        }
-        self.fp_window = combo(["Live (4H réel)"] + list(self.FP_WINDOWS_LONG.keys()),
-                               "Live (4H réel)")
-        ctrl.addWidget(self.fp_window)
-        lbl0 = QtWidgets.QLabel("  MODE :"); lbl0.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        # FOOTPRINT = UNIQUEMENT le tick réel (4H). Aucune donnée estimée : les modes
+        # historiques (klines jours/mois) répartissaient le volume par prix de façon
+        # ESTIMÉE (les klines n'ont pas le volume par niveau) -> supprimés.
+        lbl0 = QtWidgets.QLabel("MODE :"); lbl0.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl0)
         self.fp_mode = combo(["Vente × Achat", "Δ net (delta)"], "Vente × Achat")
         ctrl.addWidget(self.fp_mode)
-        lbl = QtWidgets.QLabel("  BOUGIE (live) :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
+        lbl = QtWidgets.QLabel("  BOUGIE :"); lbl.setStyleSheet(f"color:{DIM};font-weight:700;font-size:11px;")
         ctrl.addWidget(lbl)
         self.fp_tf = combo(["1 min", "2 min", "5 min"], "1 min")
         ctrl.addWidget(self.fp_tf)
@@ -3688,53 +3723,37 @@ class Cockpit(QtWidgets.QMainWindow):
         outer.addLayout(body, 1)
         self._fp_page = page
 
-        self.fp_window.currentIndexChanged.connect(self._refresh_footprint)
+        self.fp_tf.currentIndexChanged.connect(self._refresh_footprint)
+        # dès que l'utilisateur zoome/déplace à la souris -> on fige la vue (elle ne se
+        # remet plus toute seule) : il peut dézoomer et voir toutes les bougies entières.
+        self.fp_plot.getViewBox().sigRangeChangedManually.connect(self._fp_on_manual_zoom)
         self._fp_timer = QtCore.QTimer(self)
         self._fp_timer.timeout.connect(self._refresh_footprint)
         self._fp_timer.start(2000)
         return page
 
+    def _fp_on_manual_zoom(self, *args):
+        """L'utilisateur a zoomé/déplacé à la souris : on coche 'figer l'échelle' pour
+        que le rafraîchissement automatique ne remette plus la vue à zéro."""
+        if not self.fp_lock.isChecked():
+            self.fp_lock.blockSignals(True)
+            self.fp_lock.setChecked(True)
+            self.fp_lock.blockSignals(False)
+
     def _refresh_footprint(self, *args):
         # ne travaille que si la page est visible (zéro coût sinon)
         if self.tabs.currentWidget() is not getattr(self, "_fp_page", None):
             return
-        import time as _t, threading
+        import time as _t
         bucket = float(self.fp_bucket.currentText().replace("$", "").strip())
-        win = self.fp_window.currentText()
-        if win not in self.FP_WINDOWS_LONG:
-            # ---- LIVE : footprint tick réel (4H) ----
-            tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
-            n_bars = min(80, max(20, int(4 * 3600 / tf)))
-            fp = self.engine.get_footprint(tf, bucket, n_bars=n_bars)
-            bars = fp["bars"]
-            if not bars:
-                self.fp_status.setText("· pré-chargement des trades (4H) en cours…")
-                return
-        else:
-            # ---- HISTORIQUE : footprint depuis les klines Binance (jours -> mois) ----
-            fine, disp_tf, limit = self.FP_WINDOWS_LONG[win]
-            tf = disp_tf
-            if not hasattr(self, "_fpL"):
-                self._fpL = {}; self._fpL_loading = set()
-            key = (win, bucket)
-            entry = self._fpL.get(key)
-            fresh = entry and (_t.time() - entry[0] < 300)
-            if not fresh and key not in self._fpL_loading:
-                self._fpL_loading.add(key)
-
-                def _load(k=key, iv=fine, dt=disp_tf, lm=limit, bk=bucket):
-                    try:
-                        data = self.engine.get_footprint_klines(iv, dt, lm, bk)
-                    except Exception:
-                        data = None
-                    self._fpL[k] = (_t.time(), data)
-                    self._fpL_loading.discard(k)
-                threading.Thread(target=_load, daemon=True).start()
-            fp = entry[1] if entry else None
-            if not fp or not fp.get("bars"):
-                self.fp_status.setText(f"· {win} — chargement des klines Binance…")
-                return
-            bars = fp["bars"]
+        # ---- UNIQUEMENT le footprint tick RÉEL (4H) : zéro estimation ----
+        tf = {"1 min": 60, "2 min": 120, "5 min": 300}[self.fp_tf.currentText()]
+        n_bars = min(80, max(20, int(4 * 3600 / tf)))
+        fp = self.engine.get_footprint(tf, bucket, n_bars=n_bars)
+        bars = fp["bars"]
+        if not bars:
+            self.fp_status.setText("· pré-chargement des trades (4H) en cours…")
+            return
         n = len(bars)
         span_min = (bars[-1]["t0"] - bars[0]["t0"]) / 60 + tf / 60
         tot_trades = sum(b["buy"] + b["sell"] for b in bars)
