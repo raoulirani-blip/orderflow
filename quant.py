@@ -33,14 +33,34 @@ class QuantFeed:
     def __init__(self):
         self.options = None       # dict ou None
         self.macro = None         # dict {nom: {price, chg}} ou None
+        self.coinbase = None      # {"price": float, "ts": ...} — spot BTC-USD Coinbase
         self.opt_error = None
         self.macro_error = None
         self._running = True
         threading.Thread(target=self._loop_options, daemon=True).start()
         threading.Thread(target=self._loop_macro, daemon=True).start()
+        threading.Thread(target=self._loop_coinbase, daemon=True).start()
 
     def stop(self):
         self._running = False
+
+    # ---------------- COINBASE spot (pour le premium spot US) ----------------
+    def _loop_coinbase(self):
+        """Prix spot BTC-USD Coinbase (API publique gratuite, sans auth). Sert à
+        calculer le Coinbase premium = demande spot institutionnelle US vs le perp."""
+        url = "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
+        while self._running:
+            try:
+                r = requests.get(url, headers=UA, timeout=8)
+                px = float(r.json().get("price"))
+                if px > 0:
+                    self.coinbase = {"price": px, "ts": time.time()}
+            except Exception:
+                pass
+            for _ in range(6):        # ~6 s
+                if not self._running:
+                    return
+                time.sleep(1)
 
     # ---------------- OPTIONS (Deribit) ----------------
     def _loop_options(self):

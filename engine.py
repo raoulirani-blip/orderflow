@@ -21,8 +21,8 @@ from connectors import CONNECTORS
 from paths import data_file
 
 
-VENUES = ["binance", "okx", "bybit", "hyperliquid"]
-N_VENUES = len(VENUES)   # pour l'affichage "N/4" (confluence multi-venues)
+VENUES = ["binance", "okx", "bybit", "hyperliquid", "bitget"]
+N_VENUES = len(VENUES)   # pour l'affichage "N/5" (confluence multi-venues)
 
 
 class Aggregator:

@@ -352,6 +352,64 @@ class HyperliquidPerp(BaseConnector):
                     last_ping = time.time()
 
 
+class BitgetFutures(BaseConnector):
+    """Bitget USDT-M perp (API v2, très proche d'OKX : snapshot puis updates).
+    ⚠️ UNITÉS À VÉRIFIER EN LIVE : pour USDT-FUTURES les tailles carnet/trades sont
+    censées être en BTC (base coin) -> CT_VAL=1. Si, une fois connecté, la contribution
+    de Bitget aux murs/volumes est ~100x ou ~0.01x celle des autres venues, l'unité
+    diffère : ajuster CT_VAL (comme OKX = 0.01)."""
+    name = "bitget"
+    WS = "wss://ws.bitget.com/v2/ws/public"
+    CT_VAL = 1.0
+
+    async def _stream(self):
+        async with websockets.connect(self.WS, max_queue=None) as ws:
+            self.bids.clear(); self.asks.clear()
+            sub = {"op": "subscribe", "args": [
+                {"instType": "USDT-FUTURES", "channel": "books", "instId": self.symbol.upper()},
+                {"instType": "USDT-FUTURES", "channel": "trade", "instId": self.symbol.upper()},
+            ]}
+            await ws.send(json.dumps(sub))
+            self.sink.on_status(self.name, "ok")
+            last_ping = time.time()
+            while self._running:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=15)
+                except asyncio.TimeoutError:
+                    await ws.send("ping"); last_ping = time.time()
+                    continue
+                if raw == "pong":
+                    continue
+                m = json.loads(raw)
+                ch = (m.get("arg") or {}).get("channel")
+                action = m.get("action")
+                data = m.get("data") or []
+                if ch == "books":
+                    if action == "snapshot":
+                        self.bids.clear(); self.asks.clear()
+                    for d in data:
+                        for p, q in d.get("bids", []):
+                            self._set(self.bids, float(p), float(q) * self.CT_VAL)
+                        for p, q in d.get("asks", []):
+                            self._set(self.asks, float(p), float(q) * self.CT_VAL)
+                    self._emit_book()
+                elif ch == "trade":
+                    for d in data:
+                        try:
+                            if isinstance(d, dict):     # format objet {ts,price,size,side}
+                                price = float(d["price"]); size = float(d["size"])
+                                is_sell = d.get("side") == "sell"
+                                ts = float(d["ts"]) / 1000.0
+                            else:                        # format tableau [ts,price,size,side]
+                                ts = float(d[0]) / 1000.0; price = float(d[1])
+                                size = float(d[2]); is_sell = d[3] == "sell"
+                        except (KeyError, ValueError, TypeError, IndexError):
+                            continue
+                        self.sink.on_trade(self.name, price, size * self.CT_VAL, is_sell, ts)
+                if time.time() - last_ping > 25:
+                    await ws.send("ping"); last_ping = time.time()
+
+
 BINANCE_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 
 
@@ -372,4 +430,5 @@ CONNECTORS = {
     "okx": OKXSwap,
     "bybit": BybitLinear,
     "hyperliquid": HyperliquidPerp,
+    "bitget": BitgetFutures,
 }

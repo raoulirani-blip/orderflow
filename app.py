@@ -1662,6 +1662,16 @@ class Cockpit(QtWidgets.QMainWindow):
             f"QTextEdit{{background:{PANEL};border:1px solid {BORDER};"
             f"border-radius:12px;color:{TXT};font-size:13px;padding:12px;}}")
         rc.addWidget(self.instit_guide, 1); bottom.addLayout(rc, 1)
+
+        # ---- COINBASE PREMIUM (argent institutionnel LENT : spot US que le perp ne voit pas) ----
+        outer.addWidget(self._h("FLUX SPOT US  ·  Coinbase premium (demande institutionnelle spot que le perp ne voit pas)"))
+        self.q_cbprem = self._quant_card("COINBASE PREMIUM  ·  spot US − perp", GREEN)
+        outer.addWidget(self.q_cbprem)
+        self.q_cbprem_read = QtWidgets.QLabel("Calcul du Coinbase premium…")
+        self.q_cbprem_read.setWordWrap(True)
+        self.q_cbprem_read.setStyleSheet(f"color:{TXT};font-size:13px;font-weight:600;"
+                                         f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:11px;")
+        outer.addWidget(self.q_cbprem_read)
         return page
 
     def _refresh_instit(self):
@@ -1740,6 +1750,33 @@ class Cockpit(QtWidgets.QMainWindow):
             f"= méfiance. Instit acheteur + retail vendeur = potentiel retournement.</div>",
         ]
         self._hset(self.instit_guide, "".join(html))
+
+        # ---- COINBASE PREMIUM (demande spot US institutionnelle "argent lent") ----
+        cb = getattr(self, "quant", None) and self.quant.coinbase
+        mid = (self._last_state or {}).get("mid")
+        if cb and mid:
+            prem = cb["price"] - mid
+            prem_pct = prem / mid * 100
+            col = GREEN if prem >= 0 else RED
+            self.q_cbprem._val.setText(f"{prem:+,.0f}$  ({prem_pct:+.03f}%)")
+            self.q_cbprem._val.setStyleSheet(f"color:{col};font-size:22px;font-weight:800;border:none;")
+            self.q_cbprem._sub.setText(f"Coinbase spot {cb['price']:,.0f} vs perp {mid:,.0f}")
+            if prem_pct > 0.05:
+                verdict, vc = "🟢🟢 US ACHÈTE FORT le spot — demande institutionnelle nette", GREEN
+            elif prem_pct > 0.02:
+                verdict, vc = "🟢 US acheteur du spot (léger biais haussier de fond)", GREEN
+            elif prem_pct < -0.05:
+                verdict, vc = "🔴🔴 US VEND FORT le spot — pression institutionnelle baissière", RED
+            elif prem_pct < -0.02:
+                verdict, vc = "🔴 US vendeur du spot (léger biais baissier)", RED
+            else:
+                verdict, vc = "🟡 Premium neutre — pas de flux spot US marqué", AMBER
+            self.q_cbprem_read.setText(
+                f"{verdict}.  Positif = les Américains achètent du VRAI BTC (argent lent Wall Street "
+                f"que le perp ne voit pas) · négatif = ils vendent.")
+            self.q_cbprem_read.setStyleSheet(
+                f"color:{vc};font-size:13px;font-weight:700;"
+                f"background:{PANEL2};border:1px solid {BORDER};border-radius:10px;padding:11px;")
 
     # ===========================================================
     # PAGE 6 — PROFIL DE VOLUME + SWEEPS + STACKED IMBALANCES
@@ -4591,6 +4628,12 @@ class Cockpit(QtWidgets.QMainWindow):
         if lq.get("long_usd", 0) + lq.get("short_usd", 0) > 0:
             L.append(f"liquidations5min longs={lq['long_usd']/1e6:.2f}M$ "
                      f"shorts={lq['short_usd']/1e6:.2f}M$")
+        cb = getattr(self, "quant", None) and self.quant.coinbase
+        if cb and mid:
+            prem = cb["price"] - mid
+            L.append(f"Coinbase premium (spot US vs perp)={prem:+.0f}$ ({prem/mid*100:+.03f}%) "
+                     f"[+ = achats spot US institutionnels 'argent lent' / - = ventes ; "
+                     f"divergence avec le perp = signal]")
         casc = self.engine.get_cascade_sweeps(300)
         if casc:
             c = casc[0]

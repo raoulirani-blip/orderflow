@@ -638,6 +638,23 @@ class AlertServer:
         g("Tape/s", "tape", "{:.0f}")
         return "\n".join(L)
 
+    def _coinbase_spot(self):
+        """Prix spot BTC-USD Coinbase (caché ~10s) pour le Coinbase premium."""
+        import time as _t
+        import requests
+        if not hasattr(self, "_cb_cache"):
+            self._cb_cache = (0.0, None)
+        ts, px = self._cb_cache
+        if _t.time() - ts < 10 and px:
+            return px
+        try:
+            r = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/ticker", timeout=6)
+            px = float(r.json().get("price"))
+            self._cb_cache = (_t.time(), px)
+        except Exception:
+            pass
+        return px
+
     def _snapshot_text(self):
         """Instantané compact pour le copilote (identique en esprit à l'appli)."""
         s = self.state or {}
@@ -718,6 +735,12 @@ class AlertServer:
             L.append(f"funding={f['rate_pct']:+.4f}% (annualisé {f.get('annual_pct',0):+.1f}%)")
         if oi:
             L.append(f"OI={oi['now']:.0f}BTC 5min={oi['chg_5m_pct']:+.2f}% 15min={oi['chg_15m_pct']:+.2f}%")
+        cb_px = self._coinbase_spot()
+        if cb_px and mid:
+            prem = cb_px - mid
+            L.append(f"Coinbase premium (spot US vs perp)={prem:+.0f}$ ({prem/mid*100:+.03f}%) "
+                     f"[+ = achats spot US institutionnels 'argent lent' / - = ventes ; "
+                     f"divergence avec le perp = signal]")
         # liquidations (page POSITIONNEMENT)
         lq = pos.get("liq_5m", {})
         if lq.get("long_usd", 0) + lq.get("short_usd", 0) > 0:
